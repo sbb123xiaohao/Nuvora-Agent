@@ -7,6 +7,11 @@ import httpx
 from .config import WORKSPACE_DIR, Config
 
 
+def redact_error(cfg: Config, error: object) -> str:
+    text = str(error)
+    return text.replace(cfg.model.api_key, "[已隐藏 API Key]") if cfg.model.api_key else text
+
+
 def list_available_models(cfg: Config, timeout: float = 15.0) -> tuple[bool, list[str], str]:
     """请求 {base_url}/models 探测端点可用模型。
 
@@ -21,15 +26,15 @@ def list_available_models(cfg: Config, timeout: float = 15.0) -> tuple[bool, lis
         headers["Authorization"] = f"Bearer {cfg.model.api_key}"
     try:
         resp = httpx.get(url, headers=headers, timeout=timeout)
-    except httpx.HTTPError as e:
-        return False, [], f"无法连接 {url}（{type(e).__name__}: {e}）"
+    except (httpx.HTTPError, ValueError, ImportError) as e:
+        return False, [], f"无法连接 {url}（{type(e).__name__}: {redact_error(cfg, e)}）"
     if resp.status_code in (401, 403):
         return False, [], (
             f"鉴权失败（HTTP {resp.status_code}）：API Key 缺失或无效。"
             f"端点本身可达，填好 key 后即可正常使用。"
         )
     if resp.status_code != 200:
-        detail = resp.text[:200].replace("\n", " ")
+        detail = redact_error(cfg, resp.text).replace("\n", " ")[:200]
         return False, [], (
             f"端点返回 HTTP {resp.status_code}（该端点可能不支持 /models 列表，"
             f"请手动填写 model 名）{detail}"
@@ -41,6 +46,8 @@ def list_available_models(cfg: Config, timeout: float = 15.0) -> tuple[bool, lis
     items = data.get("data") if isinstance(data, dict) else data
     if items is None and isinstance(data, dict):
         items = data.get("models")
+    if not isinstance(items, list):
+        return False, [], "端点返回的模型列表格式无效：data/models 应为数组"
     ids: list[str] = []
     for item in items or []:
         if isinstance(item, dict) and item.get("id"):
@@ -82,18 +89,19 @@ def ping_model(cfg: Config) -> tuple[bool, str]:
         text = reply.content if isinstance(reply.content, str) else str(reply.content)
         return True, f"对话接口正常（回复片段：{text[:50]!r}）"
     except Exception as e:  # noqa: BLE001 —— 诊断场景需要看到任何错误
-        return False, f"对话接口异常：{type(e).__name__}: {e}"
+        return False, f"对话接口异常：{type(e).__name__}: {redact_error(cfg, e)}"
 
 
 def run_doctor(cfg: Config, ping: bool = False) -> list[tuple[str, str, str]]:
     """逐项体检，返回 (检查项, 状态, 说明) 列表；状态 ∈ {ok, warn, fail}。"""
     import sys
+    import tempfile
 
     checks: list[tuple[str, str, str]] = []
 
     version = sys.version.split()[0]
     checks.append(
-        ("Python 版本", "ok" if sys.version_info >= (3, 10) else "fail", version)
+        ("Python 版本", "ok" if sys.version_info >= (3, 11) else "fail", version)
     )
 
     if cfg.missing_file:
@@ -130,12 +138,17 @@ def run_doctor(cfg: Config, ping: bool = False) -> list[tuple[str, str, str]]:
 
     try:
         WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-        probe = WORKSPACE_DIR / ".doctor_probe"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink()
+        with tempfile.NamedTemporaryFile(dir=WORKSPACE_DIR, prefix=".doctor-", mode="w") as probe:
+            probe.write("ok")
+            probe.flush()
         checks.append(("工作区沙箱", "ok", str(WORKSPACE_DIR)))
     except OSError as e:
         checks.append(("工作区沙箱", "fail", f"不可写：{e}"))
+
+    from .tools.python_repl import sandbox_status
+
+    available, detail = sandbox_status(WORKSPACE_DIR)
+    checks.append(("Python 执行隔离", "ok" if available else "warn", detail))
 
     try:
         import langchain  # noqa: F401

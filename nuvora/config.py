@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import math
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+from urllib.parse import urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = PROJECT_ROOT / "config.toml"
@@ -55,24 +57,47 @@ class Config:
     missing_file: bool = False
 
 
+class ConfigError(ValueError):
+    """配置无效；错误消息不包含密钥或原始配置内容。"""
+
+
 def _apply(section: object, raw: dict) -> None:
-    """把 TOML 里的字段写入 dataclass，忽略未知键，类型尽量兼容。"""
+    """加载已知键并校验类型，避免把字符串 false 当成 True。"""
     valid = {f.name for f in fields(section)}
     for key, value in raw.items():
         if key not in valid:
             continue
         current = getattr(section, key)
-        try:
-            if isinstance(current, bool):
-                setattr(section, key, bool(value))
-            elif isinstance(current, int):
-                setattr(section, key, int(value))
-            elif isinstance(current, float):
-                setattr(section, key, float(value))
-            else:
-                setattr(section, key, str(value))
-        except (TypeError, ValueError):
-            pass  # 类型不对就保留默认值
+        if isinstance(current, bool):
+            valid_type = type(value) is bool
+        elif isinstance(current, int):
+            valid_type = type(value) is int
+        elif isinstance(current, float):
+            valid_type = type(value) in (int, float)
+        else:
+            valid_type = isinstance(value, str)
+        if not valid_type:
+            raise ConfigError(f"配置项 {type(section).__name__}.{key} 类型不正确")
+        setattr(section, key, float(value) if isinstance(current, float) else value)
+
+
+def validate_config(cfg: Config) -> None:
+    for name, value, low, high in (
+        ("agent.max_iterations", cfg.agent.max_iterations, 1, 1000),
+        ("tools.python_timeout", cfg.tools.python_timeout, 1, 120),
+        ("tools.web_search_max_results", cfg.tools.web_search_max_results, 1, 20),
+    ):
+        if type(value) is not int or not low <= value <= high:
+            raise ConfigError(f"{name} 必须是 {low}–{high} 之间的整数")
+    if not math.isfinite(cfg.model.temperature) or not 0 <= cfg.model.temperature <= 2:
+        raise ConfigError("model.temperature 必须是 0–2 之间的有限数值")
+    try:
+        url = urlsplit(cfg.model.base_url)
+        url.port  # 同时校验端口是否合法
+    except ValueError:
+        raise ConfigError("model.base_url 不是有效的 HTTP/HTTPS 地址") from None
+    if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.query or url.fragment:
+        raise ConfigError("model.base_url 必须是无内嵌凭据的 HTTP/HTTPS 地址")
 
 
 def load_config() -> Config:
@@ -84,8 +109,13 @@ def load_config() -> Config:
             path = CONFIG_EXAMPLE_PATH
             cfg.using_example = True
     if path is not None:
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
+        try:
+            with open(path, "rb") as f:
+                raw = tomllib.load(f)
+        except tomllib.TOMLDecodeError:
+            raise ConfigError("配置文件 TOML 格式无效，请检查引号、表名和字段类型") from None
+        except OSError as e:
+            raise ConfigError(f"无法读取配置文件：{type(e).__name__}") from None
         if isinstance(raw.get("model"), dict):
             _apply(cfg.model, raw["model"])
         if isinstance(raw.get("agent"), dict):
@@ -105,10 +135,11 @@ def load_config() -> Config:
         ("NUVORA_MODEL", cfg.model, "model"),
     ):
         value = os.environ.get(env_name)
-        if value:
+        if value and value.strip():
             setattr(target, attr, value.strip())
 
     cfg.model.base_url = (cfg.model.base_url or "").strip().rstrip("/")
     cfg.model.api_key = (cfg.model.api_key or "").strip()
     cfg.model.model = (cfg.model.model or "").strip()
+    validate_config(cfg)
     return cfg

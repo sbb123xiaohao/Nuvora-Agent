@@ -2,10 +2,14 @@
 
 一个基于 **LangGraph** 的通用 AI 智能助理，运行在你的终端里（WSL）。
 
+当前版本 **0.1.1**，需要 **Python 3.11+**。Linux/WSL 的 Python 执行还需要
+**bubblewrap 0.9+、libseccomp** 及系统允许的隔离命名空间。请通过系统包管理器安装这两个组件。
+如果系统不允许隔离，`run_python` 会返回不可用原因；其余对话、联网、文件与记忆功能仍可使用。
+
 - 🌐 **模型自定义**：任意 OpenAI 兼容端点（智谱 GLM / DeepSeek / OpenRouter / Ollama 本地模型……），填 `base_url` + `api_key` 即用
 - 🔍 **自动探测模型**：`nuvora models` 一键列出端点下的所有可用模型
 - 🛠 **内置 8+3 工具**：联网搜索、网页阅读、文件读写（沙箱）、Python 代码执行、时间/系统信息 + 长期记忆（remember / recall / forget）
-- 🧠 **双层记忆**：会话检查点（重启不丢对话）+ 长期记忆（记住你的偏好与项目）
+- 🧠 **双层记忆**：会话检查点（可跨重启恢复）+ 长期记忆（串行事务保护并发写入）
 - ⚡ **ReAct 循环**：推理 → 调工具 → 观察 → 再推理，直到给出答案
 
 ---
@@ -13,6 +17,9 @@
 ## 快速开始
 
 ### 1. 安装依赖（已装好可跳过）
+
+`requirements.txt` 和 `requirements.lock.txt` 固定了通过执行验证的依赖组合。
+已有环境也应重新运行安装命令，升级旧的 SQLite 检查点组件；HTTPX 的 SOCKS 支持已包含在依赖里。
 
 ```bash
 wsl bash -c "cd '/mnt/c/Users/sunaookamishiroko/Downloads/AI AGENT' && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
@@ -102,9 +109,11 @@ wsl bash -c "cd '/mnt/c/Users/sunaookamishiroko/Downloads/AI AGENT' && .venv/bin
 AI AGENT/
 ├── DESIGN.md            # 架构设计文档（先看这个）
 ├── README.md            # 本文件
-├── requirements.txt     # 依赖清单
+├── requirements.txt     # 直接依赖及版本约束
+├── requirements.lock.txt # 完整依赖锁定，不指定镜像源
 ├── config.example.toml  # 配置模板 → 复制为 config.toml
 ├── smoke_test.py        # 无 key 冒烟测试
+├── tests/               # 无 API 回归，含真实 Agent/SQLite 执行
 ├── workspace/           # Agent 的文件沙箱（它只能碰这里）
 ├── data/                # 运行时生成：会话检查点 + 长期记忆（SQLite）
 └── nuvora/              # 源码
@@ -122,6 +131,21 @@ AI AGENT/
 - **404 Not Found** → 模型名拼写错误，或 `base_url` 少了 `/v1` 之类的前缀；用 `nuvora models` 核对。
 - **连不上端点** → 检查网络/VPN；Ollama 需先 `ollama serve`。
 - **想重置对话记忆** → 删除 `data/` 目录下对应文件（`checkpoints.db` = 会话，`memory.db` = 长期记忆）。
-- **安全须知** → Agent 只能读写 `workspace/`；`run_python` 是子进程级隔离（有超时），不要让它执行来源不明的危险代码。
+- **Python 执行不可用** → `doctor` 会报告原因。安装 bubblewrap/libseccomp，并确认系统允许用户、进程、网络和挂载命名空间；原生 Windows 请在 WSL 中运行。
+- **文件权限** → 文件工具限制在 `workspace/`。Python 使用操作系统隔离：工作区可写、Python 运行时只读、宿主私有目录不挂载、禁止联网、只传递固定环境变量。
+- **执行限额** → Python 默认 30 秒、最长 120 秒；每个进程内存上限 512 MiB，单文件写入上限 32 MiB，临时目录 64 MiB；管道输出在收集时限长。超时会清理执行进程及其后代。这些限额不等于工作区总磁盘配额。
+- **本地数据** → `config.toml`、`data/`、工作区生成文件和虚拟环境均排除在 Git 提交之外。
+
+## 验证
+
+```bash
+.venv/bin/python smoke_test.py
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m pip check
+```
+
+测试不调用真实模型 API。冒烟测试现在会执行工具循环并写入 SQLite，回归还会重新打开数据库验证历史上下文。
+隔离受限的环境会明确跳过实际 Python 沙箱测试，同时继续验证“隔离缺失时拒绝执行”、环境清理、输出限长和后代进程超时清理。
+跳过不代表对应功能已验收；应在目标 Linux/WSL 环境运行 `doctor` 和这些测试。
 
 更完整的架构说明、安全边界与扩展路线见 [DESIGN.md](DESIGN.md)。

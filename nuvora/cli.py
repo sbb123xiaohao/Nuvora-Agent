@@ -12,9 +12,9 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import APP_NAME, TAGLINE, __version__
-from .agent import build_agent, open_checkpointer
-from .config import DATA_DIR, WORKSPACE_DIR, Config, load_config
-from .llm import list_available_models, run_doctor
+from .agent import build_agent, list_thread_ids, open_checkpointer
+from .config import DATA_DIR, WORKSPACE_DIR, Config, ConfigError, load_config
+from .llm import list_available_models, redact_error, run_doctor
 from .memory import LongTermMemory
 from .tools import build_tools
 
@@ -73,7 +73,21 @@ class ChatSession:
         self.memory = LongTermMemory(DATA_DIR / "memory.db") if cfg.memory.enabled else None
         self.checkpointer = open_checkpointer(DATA_DIR / "checkpoints.db")
         self.thread_id = "default"
-        self.model_name: str | None = cfg.model.model or None
+        self._models_by_thread: dict[str, str] = {}
+        self._closed = False
+
+    @property
+    def model_name(self) -> str | None:
+        return self._models_by_thread.get(self.thread_id) or self.cfg.model.model or None
+
+    def close(self) -> None:
+        if not self._closed:
+            try:
+                self.checkpointer.conn.close()
+            finally:
+                if self.memory is not None:
+                    self.memory.close()
+                self._closed = True
 
     # ---------- 命令 ----------
 
@@ -93,7 +107,7 @@ class ChatSession:
                 table.add_row(name, desc)
             console.print(table)
         elif cmd == "/new":
-            self.thread_id = uuid.uuid4().hex[:8]
+            self.thread_id = uuid.uuid4().hex
             console.print(f"[green]✓[/] 已开启新会话，thread_id = [bold]{self.thread_id}[/]（旧会话仍保留）")
         elif cmd == "/sessions":
             self._cmd_sessions()
@@ -114,10 +128,7 @@ class ChatSession:
     def _cmd_sessions(self):
         ids: list[str] = []
         try:
-            for tup in self.checkpointer.list(None, limit=200):
-                tid = tup.config.get("configurable", {}).get("thread_id")
-                if tid and tid not in ids:
-                    ids.append(tid)
+            ids = list_thread_ids(self.checkpointer)
         except Exception as e:  # noqa: BLE001
             console.print(f"[red]读取会话失败：[/]{e}")
             return
@@ -136,12 +147,15 @@ class ChatSession:
         if not arg:
             console.print("用法：/resume <thread_id>（先用 /sessions 查看）")
             return
-        for tup in self.checkpointer.list(None, limit=500):
-            tid = tup.config.get("configurable", {}).get("thread_id")
-            if tid == arg:
-                self.thread_id = arg
-                console.print(f"[green]✓[/] 已切换到会话 [bold]{arg}[/]，历史上下文已恢复")
-                return
+        try:
+            checkpoint = self.checkpointer.get_tuple({"configurable": {"thread_id": arg, "checkpoint_ns": ""}})
+        except Exception as e:
+            console.print(f"[red]读取会话失败：[/]{redact_error(self.cfg, e)}")
+            return
+        if checkpoint is not None:
+            self.thread_id = arg
+            console.print(f"[green]✓[/] 已切换到会话 [bold]{arg}[/]，历史上下文已恢复")
+            return
         console.print(f"[yellow]没有找到会话 {arg}[/]")
 
     def _cmd_model(self, arg: str):
@@ -149,7 +163,7 @@ class ChatSession:
             current = self.model_name or "（未设置）"
             console.print(f"当前模型：[bold cyan]{current}[/]（用 /model <名称> 临时切换）")
             return
-        self.model_name = arg
+        self._models_by_thread[self.thread_id] = arg
         console.print(f"[green]✓[/] 本会话模型已切换为 [bold]{arg}[/]（不写回配置文件；要持久化请编辑 config.toml）")
 
     def _cmd_models(self):
@@ -217,7 +231,7 @@ class ChatSession:
             model = self._build_model()
             agent = build_agent(self.cfg, model, self.memory, self.checkpointer)
         except Exception as e:  # noqa: BLE001
-            console.print(Panel(f"构建 Agent 失败：{e}", border_style="red"))
+            console.print(Panel(f"构建 Agent 失败：{redact_error(self.cfg, e)}", border_style="red"))
             return
 
         config = {
@@ -231,6 +245,11 @@ class ChatSession:
             printed = 0
 
         try:
+            if not self.cfg.cli.stream:
+                state = agent.invoke({"messages": [("user", user_text)]}, config=config)
+                for msg in state.get("messages", [])[printed:]:
+                    self._render_message(msg)
+                return
             for state in agent.stream(
                 {"messages": [("user", user_text)]},
                 config=config,
@@ -243,7 +262,7 @@ class ChatSession:
         except KeyboardInterrupt:
             console.print("\n[dim]⏹ 已打断本回合[/]")
         except Exception as e:  # noqa: BLE001
-            console.print(Panel(f"{type(e).__name__}: {e}\n\n💡 {_hint_for(e)}", title="出错了", border_style="red"))
+            console.print(Panel(f"{type(e).__name__}: {redact_error(self.cfg, e)}\n\n💡 {_hint_for(e)}", title="出错了", border_style="red"))
 
     def _build_model(self):
         from .llm import build_chat_model
@@ -279,6 +298,12 @@ class ChatSession:
     # ---------- 主循环 ----------
 
     def run(self):
+        try:
+            self._run_loop()
+        finally:
+            self.close()
+
+    def _run_loop(self):
         model_status = self.model_name or "[yellow]未配置模型（/models 探测，或编辑 config.toml）[/]"
         console.print(
             Panel(
@@ -299,7 +324,12 @@ class ChatSession:
             if not line:
                 continue
             if line.startswith("/"):
-                if not self.handle_command(line):
+                try:
+                    keep_running = self.handle_command(line)
+                except Exception as e:
+                    console.print(Panel(redact_error(self.cfg, e), title="命令执行失败", border_style="red"))
+                    continue
+                if not keep_running:
                     console.print("[dim]再见，NUVORA 随时待命 ✦[/]")
                     break
                 continue
@@ -349,6 +379,14 @@ def _usage() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except ConfigError as e:
+        console.print(Panel(str(e), title="配置错误", border_style="red"))
+        return 1
+
+
+def _main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] == "chat":
         ChatSession(load_config()).run()

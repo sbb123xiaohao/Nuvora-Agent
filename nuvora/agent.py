@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import SYSTEM_PROMPT_TEMPLATE, APP_NAME, TAGLINE, __version__
-from .config import Config, WORKSPACE_DIR
+from .config import Config
 from .memory import LongTermMemory
 from .tools import build_tools
 
@@ -20,8 +20,20 @@ def open_checkpointer(db_path: Path):
 
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     return SqliteSaver(conn)
+
+
+def list_thread_ids(checkpointer) -> list[str]:
+    """按最新检查点列出全部会话，不反序列化每一条历史消息。"""
+    with checkpointer.cursor(transaction=False) as cursor:
+        rows = cursor.execute(
+            "SELECT thread_id FROM checkpoints WHERE checkpoint_ns = '' "
+            "GROUP BY thread_id ORDER BY MAX(checkpoint_id) DESC"
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
 def build_system_prompt(cfg: Config, memory: LongTermMemory | None) -> str:
@@ -39,13 +51,9 @@ def build_system_prompt(cfg: Config, memory: LongTermMemory | None) -> str:
 
 
 def build_agent(cfg: Config, model, memory: LongTermMemory | None, checkpointer):
-    """组装 agent 图。兼容 create_agent 不同版本的 system_prompt/prompt 参数名。"""
+    """按已验证的 LangChain 版本组装 agent 图。"""
     from langchain.agents import create_agent
 
     tools = build_tools(cfg, memory if cfg.memory.enabled else None)
     system_prompt = build_system_prompt(cfg, memory)
-    kwargs = dict(model=model, tools=tools, checkpointer=checkpointer)
-    try:
-        return create_agent(system_prompt=system_prompt, **kwargs)
-    except TypeError:
-        return create_agent(prompt=system_prompt, **kwargs)
+    return create_agent(model=model, tools=tools, system_prompt=system_prompt, checkpointer=checkpointer)

@@ -1,7 +1,7 @@
 # NUVORA 架构设计文档
 
 > **NUVORA** = **Nova**（新星）+ **Ora**（时刻）——「此刻升起的新星」
-> 一个基于 LangGraph 的通用 AI 智能助理 · v0.1.0
+> 一个基于 LangGraph 的通用 AI 智能助理 · v0.1.1
 
 ---
 
@@ -126,15 +126,22 @@ OpenAI 兼容接口已是 2026 年的行业默认。`langchain_openai.ChatOpenAI
 
 `resolve_in_sandbox()` 是唯一的路径入口：
 
-1. 统一斜杠，剥离绝对路径前缀与 Windows 盘符（模型偶尔会输出绝对路径）；
+1. 统一斜杠，拒绝绝对路径、Windows 盘符、空路径和 NUL；`.` 表示工作区根目录；
 2. **拒绝任何含 `..` 的路径**；
-3. `resolve()` 解析符号链接后，再校验目标仍在 `workspace/` 真实根内（防 symlink 逃逸）。
+3. `resolve()` 解析符号链接后，再校验目标仍在 `workspace/` 真实根内；
+4. POSIX 下通过目录句柄逐层打开、不跟随被替换的链接；覆盖写入使用同目录临时文件及原子替换；
+5. 读取只接收普通文件、最多读取 20K 字符；目录结果最多 1000 项，单次文本写入最多 100 万字符。
 
 沙箱根 = 项目目录下的 `workspace/`，与代码目录隔离。
 
-### 5.3 代码执行边界（诚实声明）
+### 5.3 Python 执行隔离
 
-`run_python` 是**子进程级隔离**：独立解释器、`-I` 隔离模式（忽略用户环境变量与用户站点包）、工作目录限定 workspace/、超时强杀（默认 30s，上限 120s）、输出截断。**它不是容器级沙箱**——进程仍拥有当前用户的系统权限。原型场景够用；若要运行不受信代码，替换点在 `tools/python_repl.py`（换 Docker/nsjail/microVM 执行即可，接口不变）。
+`run_python` 只在 Linux/WSL 的 bubblewrap + libseccomp 隔离成功建立后执行代码；没有无隔离回退。
+工作区作为 `/workspace` 挂载并可写，Python 运行时和必要系统库只读，其余宿主目录不挂载。
+用户、PID、网络、IPC、挂载等命名空间隔离，禁止创建新的用户命名空间，移除 capabilities；seccomp 额外拒绝 socket、io_uring、挂载、ptrace 等系统调用。
+解释器使用 `-I -B`；固定环境白名单不包含密钥、代理和用户环境变量。默认 30 秒、上限 120 秒；每个进程限制 CPU、512 MiB 地址空间、32 MiB 单文件大小、文件描述符及进程数量；临时目录 64 MiB。
+输出管道持续排空，只保留有限字节。外层进程组清理与隔离 PID 命名空间共同结束执行后代。
+这些限制不是工作区总磁盘配额或整个任务的总资源配额。系统不支持隔离时，工具明确返回不可用；doctor 和测试显示对应状态。
 
 ### 5.4 工具错误处理约定
 
@@ -158,13 +165,19 @@ OpenAI 兼容接口已是 2026 年的行业默认。`langchain_openai.ChatOpenAI
 
 | 威胁 | 缓解 |
 |---|---|
-| 路径逃逸读写任意文件 | 沙箱路径规范化 + `..` 拒绝 + resolve 后二次校验 |
-| 代码执行失控/死循环 | 子进程超时强杀；代码长度上限；输出截断 |
+| 路径逃逸读写任意文件 | 路径校验 + POSIX 目录句柄/no-follow + 原子替换 |
+| 代码执行越界/失控 | bubblewrap + seccomp；固定环境；资源限额；超时清理后代；有界输出 |
 | API key 泄漏 | key 仅在内存与 config.toml；doctor 输出打码（`sk-1****abcd`）；不写日志 |
 | 提示词注入放大 | 工具输出以 ToolMessage 形式参与推理，敏感操作（删记忆需编号、写文件需明确意图）由系统提示约束 |
 | 失控循环烧 token | `recursion_limit` 硬上限（默认 30 轮工具调用） |
 
-生产加固建议（原型未做）：容器化执行 run_python；工具白名单按会话授权；MCP 接入时遵循「认证每个 server、最小权限、审计一切」清单。
+仍可扩展：按会话配置工具权限、工作区总磁盘配额、MCP 接入认证与审计。
+
+### 7.1 SQLite 和会话一致性
+
+长期记忆以 `RLock` 覆盖完整读写操作，写入通过 SQLite 事务提交或回滚；WAL 和 busy timeout 处理其他连接的争用。
+会话列表按 SQLite 中的 thread_id 聚合最新检查点，恢复按 thread_id 直接查询，不再受最近 200/500 条检查点的扫描限制。
+模型临时覆盖按当前 thread_id 保存；`/new` 不继承另一个会话的覆盖。退出时关闭两类数据库连接。
 
 ---
 
@@ -189,7 +202,8 @@ AI AGENT/
     │   ├── __init__.py        工具注册表：build_tools(cfg, memory) → list[BaseTool]
     │   ├── web.py             web_search / web_fetch
     │   ├── files.py           沙箱路径解析 + 文件三件套
-    │   ├── python_repl.py     run_python_code
+│   ├── python_repl.py     run_python_code
+│   ├── _python_sandbox.py bubblewrap/seccomp 与执行管道
     │   └── system.py          时间 / 环境信息
     ├── cli.py                 ChatSession（流式渲染 + 斜杠命令）+ doctor/models 子命令
     └── __main__.py            python -m nuvora 入口
@@ -212,7 +226,9 @@ AI AGENT/
 ## 9. 测试与验收
 
 **冒烟测试**（`smoke_test.py`，10 项，无 API 消耗）：
-配置加载 → 沙箱读写 → **4 种路径逃逸拦截** → 记忆增查删 → 记忆 LangChain 工具链 → run_python 执行/超时/异常三分支 → 不可达端点优雅降级 → Agent 图离线构建 → 系统提示词完整性 → 依赖完整性。
+配置加载 → 默认根目录及文件读写 → 路径逃逸拦截 → 记忆增查删 → 记忆工具链 → run_python 执行/超时/异常（隔离不可用时明确跳过）→ 不可达端点降级 → 真实离线 Agent 工具循环和 SQLite 写入 → 提示词完整性 → 依赖完整性。
+
+`python -m unittest discover -s tests -v` 还验证真实数据库重开恢复、20 个并行记忆工具、480 次并发写入、600 个新检查点后的旧会话恢复、符号链接替换竞态、原子写入失败、无隔离拒绝执行、环境清理、输出限长及后代超时终止。实际 Python 隔离测试在宿主禁止命名空间时跳过，并注明原因。
 
 **真实对话验收**（需 key）：`doctor --ping` 通过 → CLI 对话 → 让它搜索并写文件 → 重启后 `/sessions` + `/resume` 恢复 → `记住…` 后新会话验证长期记忆生效。
 

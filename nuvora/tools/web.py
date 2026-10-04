@@ -8,7 +8,7 @@ from ..config import Config
 def do_web_search(cfg: Config, query: str, max_results: int | None = None) -> str:
     if not query.strip():
         return "（搜索词为空）"
-    limit = max_results or cfg.tools.web_search_max_results
+    limit = max(1, min(max_results if max_results is not None else cfg.tools.web_search_max_results, 20))
     try:
         from ddgs import DDGS
     except ImportError:
@@ -41,13 +41,18 @@ def do_web_fetch(url: str, max_chars: int = 8000) -> str:
     except ImportError:
         have_trafilatura = False
 
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) NUVORA/0.1 (+agent)"}
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) NUVORA/0.1 (+agent)", "Accept-Encoding": "identity"}
     try:
-        resp = httpx.get(url, headers=headers, timeout=20, follow_redirects=True)
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
+        with httpx.stream("GET", url, headers=headers, timeout=20, follow_redirects=True) as resp:
+            resp.raise_for_status()
+            content = bytearray()
+            for chunk in resp.iter_bytes(chunk_size=8192):
+                if len(content) + len(chunk) > 2 * 1024 * 1024:
+                    return "抓取失败：网页内容超过 2 MiB 下载上限"
+                content.extend(chunk)
+            html = content.decode(resp.encoding or "utf-8", errors="replace")
+    except (httpx.HTTPError, ValueError, ImportError) as e:
         return f"抓取失败：{type(e).__name__}: {e}"
-    html = resp.text
     text = None
     if have_trafilatura:
         try:

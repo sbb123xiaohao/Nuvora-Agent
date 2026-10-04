@@ -74,9 +74,10 @@ def _make_run_python(cfg: Config) -> BaseTool:
 
     @tool
     def run_python(code: str) -> str:
-        """在沙箱内执行一段 Python 代码（子进程、带超时），返回 stdout/stderr。
+        """在 Linux/WSL 的操作系统隔离中执行 Python，返回 stdout/stderr。
         适合计算、数据处理、日期推算、格式转换、生成文件到 workspace/ 等。
-        代码用 print() 输出结果；标准库可用，第三方库不一定已安装。"""
+        禁止联网；隔离不可用时拒绝执行。代码用 print() 输出结果。
+        标准库可用，第三方库不一定已安装。"""
         return python_repl.run_python_code(code, cfg.tools.python_timeout, WORKSPACE_DIR)
 
     return run_python

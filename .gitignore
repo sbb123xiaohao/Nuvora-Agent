@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+config.toml
+data/
+workspace/*
+!workspace/.gitkeep
+*.zip
+*.bundle
