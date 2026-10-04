@@ -1,9 +1,9 @@
 # ============================================================
 #  NUVORA 配置文件
-#  推荐：运行 start.bat/start.sh，在网页右侧填写并保存，无需手动复制。
+#  推荐：运行 start.bat/start.sh，在终端输入 /setup 配置并保存。
 #  环境变量可覆盖：NUVORA_API_KEY / NUVORA_BASE_URL / NUVORA_MODEL
 #  不知道有什么模型？先运行：
-#    wsl bash -c "cd '<项目目录>' && .venv/bin/python -m nuvora models"
+#    python -m nuvora models
 # ============================================================
 
 [model]
@@ -29,7 +29,7 @@ temperature = 0.7
 max_iterations = 30
 
 [tools]
-# Agent 工具开关（网页右侧也可保存）
+# Agent 工具开关（终端 /setup 也可保存）
 web_enabled = true
 files_enabled = true
 python_enabled = true

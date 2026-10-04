@@ -14,18 +14,20 @@ from rich.table import Table
 
 from . import APP_NAME, TAGLINE, __version__
 from .agent import list_thread_ids
-from .config import DATA_DIR, WORKSPACE_DIR, Config, ConfigError, load_config
+from .config import CONFIG_PATH, DATA_DIR, WORKSPACE_DIR, Config, ConfigError, ConfigStore, load_config
 from .llm import list_available_models, redact_error, run_doctor
 from .memory import LongTermMemory
 from .messages import content_text
 from .runtime import AgentRuntime
 from .sessions import SessionRepository
+from .terminal_setup import configure
 from .tools import build_tools
 
 console = Console()
 
 HELP_ROWS = [
     ("/help", "显示本帮助"),
+    ("/setup", "配置模型、密钥、工具与高级参数并保存，下一回合生效"),
     ("/new", "开始一个新会话（历史会话保留，可用 /sessions 查看）"),
     ("/sessions", "列出历史会话"),
     ("/resume <id>", "切换到某个历史会话继续聊"),
@@ -55,7 +57,8 @@ def _hint_for(error: Exception) -> str:
 
 class ChatSession:
     def __init__(self, cfg: Config):
-        self.cfg = cfg
+        self.settings = ConfigStore(CONFIG_PATH, DATA_DIR, cfg)
+        self.cfg = self.settings.snapshot()
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
         self.workspace = WORKSPACE_DIR
@@ -63,9 +66,8 @@ class ChatSession:
             self.repository = SessionRepository(DATA_DIR)
             resources.callback(self.repository.close)
             self.checkpointer = self.repository.checkpointer
-            self.memory = LongTermMemory(DATA_DIR / "memory.db") if cfg.memory.enabled else None
-            if self.memory is not None:
-                resources.callback(self.memory.close)
+            self.memory = LongTermMemory(DATA_DIR / "memory.db")
+            resources.callback(self.memory.close)
             self._resources = resources.pop_all()
         self.thread_id = "default"
         self._models_by_thread: dict[str, str] = {}
@@ -99,6 +101,8 @@ class ChatSession:
             for name, desc in HELP_ROWS:
                 table.add_row(name, desc)
             console.print(table)
+        elif cmd in ("/setup", "/config"):
+            self._cmd_setup()
         elif cmd == "/new":
             self.thread_id = uuid.uuid4().hex
             console.print(f"[green]✓[/] 已开启新会话，thread_id = [bold]{self.thread_id}[/]（旧会话仍保留）")
@@ -136,6 +140,13 @@ class ChatSession:
         console.print(table)
         console.print("[dim]用 /resume <thread_id> 继续某个会话[/]")
 
+    def _cmd_setup(self):
+        cfg = configure(self.settings, console)
+        if cfg is not None:
+            self.cfg = cfg
+            self._models_by_thread.pop(self.thread_id, None)
+            console.print("[green]✓[/] 下一回合使用已保存的配置。")
+
     def _cmd_resume(self, arg: str):
         if not arg:
             console.print("用法：/resume <thread_id>（先用 /sessions 查看）")
@@ -157,14 +168,14 @@ class ChatSession:
             console.print(f"当前模型：[bold cyan]{current}[/]（用 /model <名称> 临时切换）")
             return
         self._models_by_thread[self.thread_id] = arg
-        console.print(f"[green]✓[/] 本会话模型已切换为 [bold]{arg}[/]（不写回配置文件；要持久化请编辑 config.toml）")
+        console.print(f"[green]✓[/] 本会话模型已切换为 [bold]{arg}[/]（不写回配置文件；用 /setup 保存设置）")
 
     def _cmd_models(self):
         console.print(f"正在探测 [cyan]{self.cfg.model.base_url or '（未配置 base_url）'}[/] …")
         ok, ids, msg = list_available_models(self.cfg)
         if not ok:
             console.print(Panel(msg, title="探测失败", border_style="yellow"))
-            console.print("[dim]提示：也可以直接在 config.toml 手动填写模型名[/]")
+            console.print("[dim]提示：用 /setup 手动填写模型名[/]")
             return
         table = Table(title=f"可用模型（{msg}）", box=None)
         table.add_column("#", justify="right", style="dim")
@@ -173,7 +184,7 @@ class ChatSession:
             mark = " ← 当前" if mid == self.model_name else ""
             table.add_row(str(i), mid + mark)
         console.print(table)
-        console.print("[dim]临时切换：/model <model id>；持久化：编辑 config.toml 的 model 字段[/]")
+        console.print("[dim]临时切换：/model <model id>；持久化：/setup[/]")
 
     def _cmd_tools(self):
         tools = build_tools(self.cfg, self.memory, self.workspace)
@@ -185,8 +196,8 @@ class ChatSession:
         console.print(table)
 
     def _cmd_memory(self, query: str):
-        if self.memory is None:
-            console.print("[yellow]长期记忆未启用[/]（config.toml [memory] enabled = false）")
+        if not self.cfg.memory.enabled:
+            console.print("[yellow]长期记忆未启用[/]（用 /setup 设置）")
             return
         rows = self.memory.search(query) if query.strip() else self.memory.recent(10)
         if not rows:
@@ -207,9 +218,8 @@ class ChatSession:
         if not (self.model_name or self.cfg.model.model):
             console.print(
                 Panel(
-                    "还没有指定模型，无法对话。两种办法：\n"
-                    "1. 运行 /models 探测端点可用模型 → /model <id> 临时启用\n"
-                    "2. 编辑 config.toml，填写 [model] model 字段（持久生效）",
+                    "还没有指定模型，先运行 /setup 配置接口、密钥和模型。\n"
+                    "也可用 /models 探测名称，再用 /model <id> 临时启用。",
                     title="缺少模型配置",
                     border_style="yellow",
                 )
@@ -279,16 +289,18 @@ class ChatSession:
             self.close()
 
     def _run_loop(self):
-        model_status = self.model_name or "[yellow]未配置模型（/models 探测，或编辑 config.toml）[/]"
+        model_status = self.model_name or "[yellow]未配置模型（/setup 配置）[/]"
         console.print(
             Panel(
                 f"[bold magenta]{APP_NAME}[/] [dim]v{__version__}[/] · {TAGLINE}\n"
                 f"模型：{model_status}\n"
-                f"沙箱：workspace/ · 记忆：{'开' if self.memory else '关'} · 会话：{self.thread_id}\n\n"
+                f"沙箱：workspace/ · 记忆：{'开' if self.cfg.memory.enabled else '关'} · 会话：{self.thread_id}\n\n"
                 f"[dim]输入 /help 查看命令，/quit 退出[/]",
                 border_style="magenta",
             )
         )
+        if not self.model_name and console.is_terminal:
+            self._cmd_setup()
         while True:
             try:
                 line = console.input("[bold cyan]你 › [/]")
@@ -337,18 +349,19 @@ def _cmd_models(cfg: Config) -> int:
     console.print(f"[green]✓[/] {cfg.model.base_url} → {msg}")
     for mid in ids:
         console.print(f"  • [cyan]{mid}[/]")
-    console.print("[dim]把模型 id 填入 config.toml 的 model 字段即可使用[/]")
+    console.print("[dim]运行 python -m nuvora configure 保存模型设置[/]")
     return 0
 
 
 def _usage() -> None:
     console.print(f"""[bold magenta]{APP_NAME}[/] v{__version__} — {TAGLINE}
 
-[bold]用法[/]：.venv/bin/python -m nuvora [命令]
+[bold]用法[/]：python -m nuvora [命令]
 
 [bold]命令[/]：
-  web              打开统一网页界面（默认，可不带命令）
-  chat             进入交互终端
+  chat             进入交互终端（默认，可不带命令）
+  configure        终端配置模型、密钥、工具与高级参数
+  web              显式启动可选网页界面
   doctor [--ping]  环境自检（--ping 额外做一次真实对话验证）
   models           列出当前端点的可用模型
   version          显示版本号""")
@@ -359,15 +372,19 @@ def main(argv: list[str] | None = None) -> int:
         return _main(argv)
     except ConfigError as e:
         console.print(Panel(str(e), title="配置错误", border_style="red"))
+        console.print("[dim]运行 python -m nuvora configure 重新配置[/]")
         return 1
 
 
 def _main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0].lower() == "web":
+    if args and args[0].lower() == "web":
         from .web_ui import main as web_main
-        return web_main(args[1:] if args else [])
-    if args[0].lower() == "chat":
+        return web_main(args[1:])
+    if not args or args[0].lower() == "chat":
+        if len(args) > 1:
+            _usage()
+            return 2
         ChatSession(load_config()).run()
         return 0
 
@@ -378,6 +395,11 @@ def _main(argv: list[str] | None = None) -> int:
     if cmd in ("help", "-h", "--help"):
         _usage()
         return 0
+    if cmd == "configure":
+        if len(args) > 1:
+            _usage()
+            return 2
+        return 0 if configure(ConfigStore(CONFIG_PATH, DATA_DIR), console) is not None else 1
 
     cfg = load_config()
     if cmd == "doctor":

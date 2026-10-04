@@ -67,7 +67,7 @@ def build_chat_model(cfg: Config, model_override: str | None = None):
     name = (model_override or cfg.model.model).strip()
     if not name:
         raise ValueError(
-            "未指定模型名：请在 config.toml 的 [model] model 中填写，"
+            "未指定模型名：请运行 `python -m nuvora configure` 填写，"
             "或先运行 `python -m nuvora models` 探测可用模型"
         )
     return ChatOpenAI(
@@ -106,10 +106,10 @@ def run_doctor(cfg: Config, ping: bool = False) -> list[tuple[str, str, str]]:
 
     if cfg.missing_file:
         checks.append(
-            ("配置文件", "warn", "未找到 config.toml（当前用示例配置）——请复制 config.example.toml 为 config.toml")
+            ("配置文件", "warn", "未找到 config.toml（当前用示例配置）——运行 python -m nuvora configure 保存设置")
         )
     elif cfg.using_example:
-        checks.append(("配置文件", "warn", "正在直接使用 config.example.toml，建议复制为 config.toml 再填写"))
+        checks.append(("配置文件", "warn", "正在使用 config.example.toml，运行 python -m nuvora configure 保存设置"))
     else:
         checks.append(("配置文件", "ok", str(cfg.config_path)))
 

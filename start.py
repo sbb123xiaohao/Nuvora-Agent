@@ -1,4 +1,4 @@
-"""首次启动准备虚拟环境，随后打开 NUVORA 统一界面。"""
+"""首次启动准备虚拟环境，随后进入 NUVORA CLI。"""
 import hashlib
 import os
 import subprocess
@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 
-def main():
+def main(argv: list[str] | None = None):
+    args = list(sys.argv[1:] if argv is None else argv)
     if sys.version_info < (3, 11):
         print("NUVORA 需要 Python 3.11 或更新版本，请安装后重新启动。")
         return 1
@@ -28,7 +29,7 @@ def main():
             print("依赖安装失败，请检查网络后重新启动。")
             return result
         marker.write_text(fingerprint + "\n")
-    return subprocess.call([str(python), "-m", "nuvora", "web", *sys.argv[1:]], cwd=root)
+    return subprocess.call([str(python), "-m", "nuvora", *args], cwd=root)
 
 
 if __name__ == "__main__":

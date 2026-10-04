@@ -241,7 +241,7 @@ class ConfigStore:
             if cfg is not None:
                 raise
             self._cfg = Config()
-            self._warning = str(error) + "。请在右侧重新填写并保存。"
+            self._warning = str(error) + "。请重新填写并保存配置。"
 
     def snapshot(self) -> Config:
         with self._lock:
