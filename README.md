@@ -1,6 +1,6 @@
 # NUVORA ✦ 此刻升起的新星
 
-一个基于 **LangGraph** 的本地 AI 智能助理。**v0.2.0 默认打开统一网页界面**：聊天、模型配置、工具开关、会话、长期记忆和工作区都在同一个页面中操作。
+一个基于 **LangGraph** 的本地 AI 智能助理。**v0.3.0 默认打开统一网页界面**：聊天、模型配置、工具开关、会话、长期记忆和工作区都在同一个页面中操作。
 
 ## 快速开始
 
@@ -68,7 +68,11 @@ python -m nuvora version
 | 文件/目录 | 用途 |
 |---|---|
 | start.bat / start.sh / start.py | 首次准备虚拟环境并打开界面 |
-| nuvora/web_ui.py | 本地 HTTP 服务、配置与 Agent 流接口 |
+| nuvora/web_ui.py | 本地 HTTP、来源与 CSRF 校验、静态资源和 SSE |
+| nuvora/application.py | 应用操作、单回合占用、取消和资源生命周期 |
+| nuvora/config.py | 配置快照、草稿校验、脱敏视图和原子保存 |
+| nuvora/sessions.py | 会话标题、检查点访问和旧会话兼容 |
+| nuvora/runtime.py / messages.py | 网页与终端共用的 Agent 执行、消息和中断恢复 |
 | nuvora/static/ | 本地 HTML/CSS/JavaScript，无 CDN 依赖 |
 | nuvora/agent.py / memory.py | Agent 图与长期记忆 |
 | nuvora/tools/ | 联网、文件、Python、时间和环境工具 |
@@ -88,5 +92,7 @@ python -m pip check
 ~~~
 
 回归包含真实 Agent 工具循环、SQLite 重开、并发写入、HTTP 配置/会话/记忆/文件操作、来源与 CSRF 校验，以及本地模拟 OpenAI 兼容端点的模型发现、连接测试、流式输出和停止后续聊。模拟端点仅存在于测试中；产品始终调用用户配置的实际模型。
+
+架构回归还验证配置快照不会被调用方修改、保存失败不改变下一回合配置、并发输入只占用一个回合、断流与清理失败释放占用、关闭应用延迟到回合退出、启动失败关闭已打开的数据库，以及历史工具不会干扰最新回复的中断恢复。模块边界和扩展方式见 [DESIGN.md](DESIGN.md)。
 
 系统禁止隔离时，实际 Python 隔离测试会明确跳过；工具仍拒绝回退到无隔离执行。

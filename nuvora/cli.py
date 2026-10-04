@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import uuid
+from contextlib import ExitStack, closing
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -12,10 +13,13 @@ from rich.panel import Panel
 from rich.table import Table
 
 from . import APP_NAME, TAGLINE, __version__
-from .agent import build_agent, list_thread_ids, open_checkpointer
+from .agent import list_thread_ids
 from .config import DATA_DIR, WORKSPACE_DIR, Config, ConfigError, load_config
 from .llm import list_available_models, redact_error, run_doctor
 from .memory import LongTermMemory
+from .messages import content_text
+from .runtime import AgentRuntime
+from .sessions import SessionRepository
 from .tools import build_tools
 
 console = Console()
@@ -49,29 +53,20 @@ def _hint_for(error: Exception) -> str:
     return "可运行 `python -m nuvora doctor --ping` 自检排查"
 
 
-def _content_text(content) -> str:
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict):
-                text = block.get("text") or block.get("content") or ""
-                if text:
-                    parts.append(str(text))
-        return "\n".join(parts)
-    return str(content or "")
-
-
 class ChatSession:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-        self.memory = LongTermMemory(DATA_DIR / "memory.db") if cfg.memory.enabled else None
-        self.checkpointer = open_checkpointer(DATA_DIR / "checkpoints.db")
+        self.workspace = WORKSPACE_DIR
+        with ExitStack() as resources:
+            self.repository = SessionRepository(DATA_DIR)
+            resources.callback(self.repository.close)
+            self.checkpointer = self.repository.checkpointer
+            self.memory = LongTermMemory(DATA_DIR / "memory.db") if cfg.memory.enabled else None
+            if self.memory is not None:
+                resources.callback(self.memory.close)
+            self._resources = resources.pop_all()
         self.thread_id = "default"
         self._models_by_thread: dict[str, str] = {}
         self._closed = False
@@ -83,10 +78,8 @@ class ChatSession:
     def close(self) -> None:
         if not self._closed:
             try:
-                self.checkpointer.conn.close()
+                self._resources.close()
             finally:
-                if self.memory is not None:
-                    self.memory.close()
                 self._closed = True
 
     # ---------- 命令 ----------
@@ -183,7 +176,7 @@ class ChatSession:
         console.print("[dim]临时切换：/model <model id>；持久化：编辑 config.toml 的 model 字段[/]")
 
     def _cmd_tools(self):
-        tools = build_tools(self.cfg, self.memory)
+        tools = build_tools(self.cfg, self.memory, self.workspace)
         table = Table(title=f"已装配 {len(tools)} 个工具", box=None)
         table.add_column("工具", style="bold cyan")
         table.add_column("说明")
@@ -229,36 +222,18 @@ class ChatSession:
             return
         try:
             model = self._build_model()
-            agent = build_agent(self.cfg, model, self.memory, self.checkpointer)
+            runtime = AgentRuntime(self.cfg, model, self.memory, self.checkpointer,
+                                   workspace=self.workspace, thread_id=self.thread_id)
         except Exception as e:  # noqa: BLE001
             console.print(Panel(f"构建 Agent 失败：{redact_error(self.cfg, e)}", border_style="red"))
             return
 
-        config = {
-            "configurable": {"thread_id": self.thread_id},
-            "recursion_limit": self.cfg.agent.max_iterations * 2 + 10,
-        }
         try:
-            snapshot = agent.get_state(config)
-            printed = len(snapshot.values.get("messages", [])) if snapshot.values else 0
-        except Exception:  # noqa: BLE001
-            printed = 0
-
-        try:
-            if not self.cfg.cli.stream:
-                state = agent.invoke({"messages": [("user", user_text)]}, config=config)
-                for msg in state.get("messages", [])[printed:]:
-                    self._render_message(msg)
-                return
-            for state in agent.stream(
-                {"messages": [("user", user_text)]},
-                config=config,
-                stream_mode="values",
-            ):
-                messages = state.get("messages", [])
-                for msg in messages[printed:]:
-                    self._render_message(msg)
-                printed = len(messages)
+            self.repository.record_turn(self.thread_id, user_text)
+            with closing(runtime.stream(user_text, streaming=self.cfg.cli.stream)) as events:
+                for event in events:
+                    if event.kind == "message":
+                        self._render_message(event.value)
         except KeyboardInterrupt:
             console.print("\n[dim]⏹ 已打断本回合[/]")
         except Exception as e:  # noqa: BLE001
@@ -282,13 +257,13 @@ class ChatSession:
                 console.print(
                     Panel(args_str, title=f"🛠 调用工具 · {tc.get('name', '?')}", border_style="dim cyan", expand=False)
                 )
-            text = _content_text(msg.content).strip()
+            text = content_text(msg.content).strip()
             if text:
                 console.print()
                 console.print(Panel(Markdown(text), title=f"✦ {APP_NAME}", title_align="left", border_style="magenta"))
                 console.print()
         elif isinstance(msg, ToolMessage):
-            text = _content_text(msg.content).strip()
+            text = content_text(msg.content).strip()
             if len(text) > 500:
                 text = text[:500] + "…（结果已截断显示）"
             console.print(

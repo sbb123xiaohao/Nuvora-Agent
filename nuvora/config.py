@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import os
+import copy
 import math
 import tomllib
 import json
 import tempfile
-from dataclasses import dataclass, field, fields
+import threading
+import uuid
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -16,6 +19,8 @@ CONFIG_PATH = PROJECT_ROOT / "config.toml"
 CONFIG_EXAMPLE_PATH = PROJECT_ROOT / "config.example.toml"
 WORKSPACE_DIR = PROJECT_ROOT / "workspace"
 DATA_DIR = PROJECT_ROOT / "data"
+CONFIG_SECTIONS = ("model", "agent", "tools", "memory", "cli")
+ENV_FIELDS = {"base_url": "NUVORA_BASE_URL", "api_key": "NUVORA_API_KEY", "model": "NUVORA_MODEL"}
 
 
 @dataclass
@@ -167,7 +172,7 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
     validate_config(cfg)
     target = Path(path) if path is not None else CONFIG_PATH
     sections = []
-    for name in ("model", "agent", "tools", "memory", "cli"):
+    for name in CONFIG_SECTIONS:
         section = getattr(cfg, name)
         lines = [f"[{name}]"]
         for item in fields(section):
@@ -193,3 +198,83 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
     finally:
         if os.path.exists(name):
             os.unlink(name)
+
+
+def patch_config(cfg: Config, payload: dict) -> Config:
+    """生成独立且经过校验的草稿；空密钥保留，明确清除才删除。"""
+    if not isinstance(payload, dict):
+        raise ConfigError("配置必须是对象。")
+    result = copy.deepcopy(cfg)
+    for name in CONFIG_SECTIONS:
+        raw = payload.get(name, {})
+        if not isinstance(raw, dict):
+            raise ConfigError("配置分组必须是对象。")
+        if name == "model":
+            raw = dict(raw)
+            if "api_key" in raw and not isinstance(raw["api_key"], str):
+                raise ConfigError("密钥必须是文本。")
+            if not raw.get("api_key"):
+                raw.pop("api_key", None)
+        _apply(getattr(result, name), raw)
+    if payload.get("clear_api_key") is True:
+        result.model.api_key = ""
+    result.model.base_url = result.model.base_url.strip().rstrip("/")
+    result.model.model = result.model.model.strip()
+    result.model.api_key = result.model.api_key.strip()
+    if len(result.model.model) > 300 or len(result.model.base_url) > 2048 or len(result.model.api_key) > 4096:
+        raise ConfigError("模型配置内容过长。")
+    validate_config(result)
+    return result
+
+
+class ConfigStore:
+    """配置所有权：快照、草稿、脱敏视图及原子保存。"""
+
+    def __init__(self, path: Path, backup_dir: Path, cfg: Config | None = None):
+        self.path, self.backup_dir = Path(path), Path(backup_dir)
+        self._lock = threading.RLock()
+        self._warning = ""
+        try:
+            self._cfg = copy.deepcopy(cfg) if cfg is not None else load_config(self.path)
+            validate_config(self._cfg)
+        except ConfigError as error:
+            if cfg is not None:
+                raise
+            self._cfg = Config()
+            self._warning = str(error) + "。请在右侧重新填写并保存。"
+
+    def snapshot(self) -> Config:
+        with self._lock:
+            return copy.deepcopy(self._cfg)
+
+    def candidate(self, payload: dict) -> Config:
+        with self._lock:
+            return patch_config(self._cfg, payload)
+
+    def public_state(self) -> dict:
+        with self._lock:
+            raw = {name: asdict(getattr(self._cfg, name)) for name in CONFIG_SECTIONS}
+            raw["model"]["api_key_configured"] = bool(raw["model"].pop("api_key"))
+            return {"config": raw, "config_warning": self._warning,
+                    "env_overrides": [field for field, name in ENV_FIELDS.items()
+                                      if os.environ.get(name, "").strip()]}
+
+    def update(self, payload: dict) -> None:
+        with self._lock:
+            cfg = patch_config(self._cfg, payload)
+            for field, name in ENV_FIELDS.items():
+                value = os.environ.get(name, "").strip()
+                expected = value.rstrip("/") if field == "base_url" else value
+                if value and getattr(cfg.model, field) != expected:
+                    raise ConfigError(f"{name} 正在覆盖此项，请先移除该环境变量再保存。")
+            if self._warning and self.path.exists():
+                self.backup_dir.mkdir(parents=True, exist_ok=True)
+                backup = self.backup_dir / ("config-backup-" + uuid.uuid4().hex + ".toml")
+                fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(self.path.read_bytes())
+            save_config(cfg, self.path)
+            cfg.config_path = self.path
+            cfg.missing_file = cfg.using_example = False
+            # 文件替换成功后才切换运行配置。
+            self._cfg, self._warning = cfg, ""

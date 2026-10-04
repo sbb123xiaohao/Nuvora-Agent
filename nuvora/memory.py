@@ -15,20 +15,24 @@ class LongTermMemory:
         self._lock = threading.RLock()
         self._closed = False
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10)
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA busy_timeout=10000")
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS memories (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                content    TEXT NOT NULL,
-                tags       TEXT NOT NULL DEFAULT '',
-                thread_id  TEXT NOT NULL DEFAULT ''
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA busy_timeout=10000")
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS memories (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    content    TEXT NOT NULL,
+                    tags       TEXT NOT NULL DEFAULT '',
+                    thread_id  TEXT NOT NULL DEFAULT ''
+                )
+                """
             )
-            """
-        )
-        self.conn.commit()
+            self.conn.commit()
+        except BaseException:
+            self.conn.close()
+            raise
 
     def add(self, content: str, tags: str = "", thread_id: str = "") -> int:
         content, tags = content.strip(), tags.strip()

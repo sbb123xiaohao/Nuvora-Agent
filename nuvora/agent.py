@@ -21,9 +21,13 @@ def open_checkpointer(db_path: Path):
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), check_same_thread=False, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
-    return SqliteSaver(conn)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        return SqliteSaver(conn)
+    except BaseException:
+        conn.close()
+        raise
 
 
 def list_thread_ids(checkpointer) -> list[str]:
@@ -36,10 +40,12 @@ def list_thread_ids(checkpointer) -> list[str]:
     return [row[0] for row in rows]
 
 
-def build_system_prompt(cfg: Config, memory: LongTermMemory | None) -> str:
+def build_system_prompt(cfg: Config, memory: LongTermMemory | None, *, tools=None) -> str:
     now = datetime.now().astimezone()
     memory_block = memory.memory_block() if memory is not None and cfg.memory.enabled else "（长期记忆未启用）"
-    available = [tool.name for tool in build_tools(cfg, memory if cfg.memory.enabled else None)]
+    if tools is None:
+        tools = build_tools(cfg, memory if cfg.memory.enabled else None)
+    available = [tool.name for tool in tools]
     return SYSTEM_PROMPT_TEMPLATE.format(
         app_name=APP_NAME,
         tagline=TAGLINE,
@@ -57,5 +63,5 @@ def build_agent(cfg: Config, model, memory: LongTermMemory | None, checkpointer,
     from langchain.agents import create_agent
 
     tools = build_tools(cfg, memory if cfg.memory.enabled else None, workspace)
-    system_prompt = build_system_prompt(cfg, memory)
+    system_prompt = build_system_prompt(cfg, memory, tools=tools)
     return create_agent(model=model, tools=tools, system_prompt=system_prompt, checkpointer=checkpointer)

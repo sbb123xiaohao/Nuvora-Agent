@@ -18,7 +18,7 @@ from nuvora.agent import build_agent, build_system_prompt
 from nuvora.config import Config, load_config
 from nuvora.llm import build_chat_model
 from nuvora.tools import build_tools
-from nuvora.web_ui import WebApplication, WebServer
+from nuvora.web_ui import WebApplication, WebHandler, WebServer
 from tests.fakes import OfflineModel
 
 
@@ -53,7 +53,7 @@ class WebTests(unittest.TestCase):
         return OfflineModel(responses=self.replies)
 
     def start(self, cfg=None):
-        with patch("nuvora.web_ui.sandbox_status", return_value=(False, "测试环境不执行 Python")):
+        with patch("nuvora.application.sandbox_status", return_value=(False, "测试环境不执行 Python")):
             self.app = WebApplication(cfg, data_dir=self.root / "data", workspace=self.root / "workspace",
                                       config_path=self.root / "config.toml", model_factory=self.model)
         self.server = WebServer(self.app, 0)
@@ -160,12 +160,12 @@ class WebTests(unittest.TestCase):
         def discover(cfg):
             captured.append(cfg)
             return False, [], "failed with " + cfg.model.api_key
-        with patch("nuvora.web_ui.list_available_models", side_effect=discover):
+        with patch("nuvora.application.list_available_models", side_effect=discover):
             response = self.post("/api/models", {"model": {"api_key": "draft-private", "base_url": "http://localhost:9000/v1"}})
         self.assertEqual(captured[0].model.base_url, "http://localhost:9000/v1")
         self.assertNotIn("draft-private", response.text)
         self.assertFalse((self.root / "config.toml").exists())
-        with patch("nuvora.web_ui.ping_model", return_value=(True, "连接正常")):
+        with patch("nuvora.application.ping_model", return_value=(True, "连接正常")):
             self.assertTrue(self.post("/api/test").json()["ok"])
 
     def test_real_streamed_tool_cycle_and_restart_history(self):
@@ -204,31 +204,23 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.app.memory.count(), 1)
 
     def test_busy_turn_rejects_mutation_and_accepts_stop(self):
-        turn = self.app.begin_turn({"text": "busy", "thread_id": self.tid})
-        try:
+        with self.app.begin_turn({"text": "busy", "thread_id": self.tid}):
             for path in ("/api/config", "/api/session", "/api/chat"):
                 payload = {"text": "other"} if path == "/api/chat" else {}
                 self.assertEqual(self.post(path, payload).status_code, 409)
             self.assertTrue(self.post("/api/stop").json()["requested"])
-        finally:
-            self.app.finish_turn()
         self.assertFalse(self.client.get("/api/state").json()["busy"])
 
     def test_stop_leaves_tool_messages_recoverable(self):
         self.replies = [AIMessage(content="", tool_calls=[{"name": "list_dir", "args": {"path": "."},
                                                           "id": "stop-tool", "type": "tool_call"}]),
                         AIMessage(content="工具之后的回复")]
-        turn = self.app.begin_turn({"text": "停止测试", "thread_id": self.tid})
-        iterator = self.app.events(turn)
         emitted = []
-        try:
-            for name, data in iterator:
+        with self.app.begin_turn({"text": "停止测试", "thread_id": self.tid}) as turn:
+            for name, data in turn.events():
                 emitted.append(name)
                 if name == "tool_start":
                     self.app.stop()
-        finally:
-            iterator.close()
-            self.app.finish_turn()
         self.assertIn("stopped", emitted)
         history = self.app.history(self.tid)
         calls = {c["id"] for m in history for c in m.get("calls", [])}
@@ -268,6 +260,18 @@ class WebTests(unittest.TestCase):
         self.assertEqual(result[-1][0], "error")
         self.assertNotIn(self.cfg.model.api_key, json.dumps(result))
         self.assertFalse(self.client.get("/api/state").json()["busy"])
+
+    def test_disconnect_before_stream_headers_releases_reserved_turn(self):
+        headers = WebHandler._headers
+        def disconnect(handler, status, mime, **kwargs):
+            if mime.startswith("text/event-stream"):
+                raise ConnectionResetError("client disconnected")
+            return headers(handler, status, mime, **kwargs)
+        with patch.object(WebHandler, "_headers", disconnect):
+            with self.assertRaises(httpx.RemoteProtocolError):
+                self.post("/api/chat", {"thread_id": self.tid, "text": "断开连接"})
+        self.assertFalse(self.client.get("/api/state").json()["busy"])
+        self.assertEqual(self.chat("重新发送")[-1][0], "done")
 
     def test_real_compatible_http_endpoint_discovery_stream_stop_and_continue(self):
         requests = []
