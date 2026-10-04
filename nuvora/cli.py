@@ -372,7 +372,8 @@ def _usage() -> None:
 [bold]用法[/]：.venv/bin/python -m nuvora [命令]
 
 [bold]命令[/]：
-  chat             进入交互对话（默认，可不带命令）
+  web              打开统一网页界面（默认，可不带命令）
+  chat             进入交互终端
   doctor [--ping]  环境自检（--ping 额外做一次真实对话验证）
   models           列出当前端点的可用模型
   version          显示版本号""")
@@ -388,7 +389,10 @@ def main(argv: list[str] | None = None) -> int:
 
 def _main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] == "chat":
+    if not args or args[0].lower() == "web":
+        from .web_ui import main as web_main
+        return web_main(args[1:] if args else [])
+    if args[0].lower() == "chat":
         ChatSession(load_config()).run()
         return 0
 

@@ -38,7 +38,8 @@ def list_thread_ids(checkpointer) -> list[str]:
 
 def build_system_prompt(cfg: Config, memory: LongTermMemory | None) -> str:
     now = datetime.now().astimezone()
-    memory_block = memory.memory_block() if memory is not None else "（长期记忆未启用）"
+    memory_block = memory.memory_block() if memory is not None and cfg.memory.enabled else "（长期记忆未启用）"
+    available = [tool.name for tool in build_tools(cfg, memory if cfg.memory.enabled else None)]
     return SYSTEM_PROMPT_TEMPLATE.format(
         app_name=APP_NAME,
         tagline=TAGLINE,
@@ -47,13 +48,14 @@ def build_system_prompt(cfg: Config, memory: LongTermMemory | None) -> str:
         weekday=WEEKDAY_CN[now.weekday()],
         now=now.strftime("%H:%M"),
         memory_block=memory_block,
+        available_tools=", ".join(available),
     )
 
 
-def build_agent(cfg: Config, model, memory: LongTermMemory | None, checkpointer):
+def build_agent(cfg: Config, model, memory: LongTermMemory | None, checkpointer, *, workspace=None):
     """按已验证的 LangChain 版本组装 agent 图。"""
     from langchain.agents import create_agent
 
-    tools = build_tools(cfg, memory if cfg.memory.enabled else None)
+    tools = build_tools(cfg, memory if cfg.memory.enabled else None, workspace)
     system_prompt = build_system_prompt(cfg, memory)
     return create_agent(model=model, tools=tools, system_prompt=system_prompt, checkpointer=checkpointer)

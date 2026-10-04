@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import math
 import tomllib
+import json
+import tempfile
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -33,6 +35,9 @@ class AgentConfig:
 class ToolsConfig:
     python_timeout: int = 30
     web_search_max_results: int = 5
+    web_enabled: bool = True
+    files_enabled: bool = True
+    python_enabled: bool = True
 
 
 @dataclass
@@ -82,6 +87,17 @@ def _apply(section: object, raw: dict) -> None:
 
 
 def validate_config(cfg: Config) -> None:
+    if any(type(value) is not bool for value in (
+        cfg.tools.web_enabled, cfg.tools.files_enabled, cfg.tools.python_enabled,
+        cfg.memory.enabled, cfg.cli.stream,
+    )):
+        raise ConfigError("工具、记忆和流式输出开关必须是布尔值")
+    if any(not isinstance(value, str) for value in (
+        cfg.model.base_url, cfg.model.api_key, cfg.model.model,
+    )):
+        raise ConfigError("模型地址、密钥和模型名称必须是文本")
+    if type(cfg.model.temperature) not in (int, float):
+        raise ConfigError("model.temperature 必须是数字")
     for name, value, low, high in (
         ("agent.max_iterations", cfg.agent.max_iterations, 1, 1000),
         ("tools.python_timeout", cfg.tools.python_timeout, 1, 120),
@@ -100,9 +116,10 @@ def validate_config(cfg: Config) -> None:
         raise ConfigError("model.base_url 必须是无内嵌凭据的 HTTP/HTTPS 地址")
 
 
-def load_config() -> Config:
+def load_config(path: Path | None = None) -> Config:
     cfg = Config()
-    path = CONFIG_PATH if CONFIG_PATH.exists() else None
+    target = Path(path) if path is not None else CONFIG_PATH
+    path = target if target.exists() else None
     if path is None:
         cfg.missing_file = True
         if CONFIG_EXAMPLE_PATH.exists():
@@ -143,3 +160,36 @@ def load_config() -> Config:
     cfg.model.model = (cfg.model.model or "").strip()
     validate_config(cfg)
     return cfg
+
+
+def save_config(cfg: Config, path: Path | None = None) -> None:
+    """验证后原子保存；私密配置不进入源码包。"""
+    validate_config(cfg)
+    target = Path(path) if path is not None else CONFIG_PATH
+    sections = []
+    for name in ("model", "agent", "tools", "memory", "cli"):
+        section = getattr(cfg, name)
+        lines = [f"[{name}]"]
+        for item in fields(section):
+            value = getattr(section, item.name)
+            if isinstance(value, str):
+                encoded = json.dumps(value, ensure_ascii=False)
+            elif type(value) is bool:
+                encoded = "true" if value else "false"
+            else:
+                encoded = str(value)
+            lines.append(f"{item.name} = {encoded}")
+        sections.append("\n".join(lines))
+    text = "# NUVORA：通过界面保存的配置，请勿提交含密钥的配置文件。\n\n" + "\n\n".join(sections) + "\n"
+    tomllib.loads(text)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=".nuvora-config-", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, target)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)

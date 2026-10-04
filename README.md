@@ -1,151 +1,92 @@
 # NUVORA ✦ 此刻升起的新星
 
-一个基于 **LangGraph** 的通用 AI 智能助理，运行在你的终端里（WSL）。
-
-当前版本 **0.1.1**，需要 **Python 3.11+**。Linux/WSL 的 Python 执行还需要
-**bubblewrap 0.9+、libseccomp** 及系统允许的隔离命名空间。请通过系统包管理器安装这两个组件。
-如果系统不允许隔离，`run_python` 会返回不可用原因；其余对话、联网、文件与记忆功能仍可使用。
-
-- 🌐 **模型自定义**：任意 OpenAI 兼容端点（智谱 GLM / DeepSeek / OpenRouter / Ollama 本地模型……），填 `base_url` + `api_key` 即用
-- 🔍 **自动探测模型**：`nuvora models` 一键列出端点下的所有可用模型
-- 🛠 **内置 8+3 工具**：联网搜索、网页阅读、文件读写（沙箱）、Python 代码执行、时间/系统信息 + 长期记忆（remember / recall / forget）
-- 🧠 **双层记忆**：会话检查点（可跨重启恢复）+ 长期记忆（串行事务保护并发写入）
-- ⚡ **ReAct 循环**：推理 → 调工具 → 观察 → 再推理，直到给出答案
-
----
+一个基于 **LangGraph** 的本地 AI 智能助理。**v0.2.0 默认打开统一网页界面**：聊天、模型配置、工具开关、会话、长期记忆和工作区都在同一个页面中操作。
 
 ## 快速开始
 
-### 1. 安装依赖（已装好可跳过）
+先安装 **Python 3.11+**，然后解压完整项目。
 
-`requirements.txt` 和 `requirements.lock.txt` 固定了通过执行验证的依赖组合。
-已有环境也应重新运行安装命令，升级旧的 SQLite 检查点组件；HTTPX 的 SOCKS 支持已包含在依赖里。
+- **Windows**：双击 `start.bat`。
+- **Linux / WSL**：在项目目录运行 `./start.sh`；如果解压工具未保留执行权限，先执行 `chmod +x start.sh`。
+- 启动器首次自动建立 `.venv` 并安装已锁定的依赖，之后直接打开浏览器。首次安装需要网络；保持启动窗口运行。
 
-```bash
-wsl bash -c "cd '/mnt/c/Users/sunaookamishiroko/Downloads/AI AGENT' && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
-```
+无需手动编辑配置文件。在页面右侧完成这几步即可：
 
-### 2. 配置模型
+1. 选择服务提供商，或填写一个 OpenAI 兼容的接口地址。
+2. 输入 API Key，点击“获取模型”后选择模型，也可以手动填写名称。
+3. 点击“保存设置”，开始聊天；“测试连接”会发起一次极短的实际模型请求。
 
-复制配置模板并填写：
+默认只监听本机 `http://127.0.0.1:8765`，不会对外发布服务。模型回复需使用支持工具调用的 OpenAI 兼容接口；模型列表接口缺失时可手动填写模型名称。Ollama 需要用户自行安装、启动并下载所需模型。
 
-```bash
-wsl bash -c "cd '/mnt/c/Users/sunaookamishiroko/Downloads/AI AGENT' && cp config.example.toml config.toml && nano config.toml"
-```
+## 一个界面完成操作
 
-需要填两个字段：
-
-```toml
-[model]
-base_url = "https://open.bigmodel.cn/api/paas/v4"   # 任意 OpenAI 兼容端点
-api_key  = "你的key"
-model    = "glm-4.6"                                 # 模型名
-```
-
-> 不知道填什么模型名？先跑第 3 步的 `models` 命令探测，或者直接看下面的常用组合。
-
-### 3. 自检 & 探测模型
-
-```bash
-cd '/mnt/c/Users/sunaookamishiroko/Downloads/AI AGENT'
-
-# 环境自检（检查配置、连通性、key、依赖）
-wsl bash -c "cd '/mnt/c/Users/sunaookamishiroko/Downloads/AI AGENT' && .venv/bin/python -m nuvora doctor"
-
-# 探测当前端点有哪些可用模型
-wsl bash -c "cd '/mnt/c/Users/sunaookamishiroko/Downloads/AI AGENT' && .venv/bin/python -m nuvora models"
-
-# 附加一次真实对话验证（消耗极少 token）
-wsl bash -c "cd '/mnt/c/Users/sunaookamishiroko/Downloads/AI AGENT' && .venv/bin/python -m nuvora doctor --ping"
-```
-
-### 4. 开聊！
-
-```bash
-wsl bash -c "cd '/mnt/c/Users/sunaookamishiroko/Downloads/AI AGENT' && .venv/bin/python -m nuvora"
-```
-
-试一句话让它跑起来：
-
-```
-你 › 搜一下今天的 AI 新闻，挑三条最重要的写进 workspace/news.md
-你 › 帮我用 Python 算一下 2 的 100 次方有多少位
-你 › 记住：我的服务器 IP 是 192.168.1.8        （存入长期记忆）
-```
-
----
-
-## 常用模型配置组合
-
-| 厂商 | base_url | model 示例 | 说明 |
-|---|---|---|---|
-| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.6`、`glm-4.5-flash` | flash 系列便宜/免费额度 |
-| DeepSeek | `https://api.deepseek.com` | `deepseek-chat` | — |
-| Moonshot | `https://api.moonshot.cn/v1` | `kimi-k2` | — |
-| OpenRouter | `https://openrouter.ai/api/v1` | `anthropic/claude-sonnet-4` 等 | 一个 key 用百款模型 |
-| Ollama 本地 | `http://localhost:11434/v1` | `qwen3:8b` | api_key 填 `ollama`，完全离线 |
-
----
-
-## 会话内命令
-
-| 命令 | 作用 |
+| 位置 | 操作 |
 |---|---|
-| `/help` | 显示帮助 |
-| `/new` | 开新会话（旧的保留） |
-| `/sessions` | 列出历史会话 |
-| `/resume <id>` | 回到某个历史会话 |
-| `/model <名>` | 临时切换模型 |
-| `/models` | 探测端点可用模型 |
-| `/tools` | 查看已装配工具 |
-| `/memory [词]` | 查看/检索长期记忆 |
-| `/quit` | 退出 |
+| 左侧 | 新建与恢复会话，查看长期记忆、工作区 |
+| 中间 | 流式聊天、查看工具过程、复制回答、停止生成 |
+| 右侧 | 服务提供商、接口地址、密钥、模型选择、连接测试、保存设置 |
+| 工具与记忆 | 允许或禁用 Agent 的联网、文件操作、Python 和长期记忆 |
+| 高级设置 | 温度、工具轮数、Python 超时、搜索条数、流式输出 |
+| 长期记忆 | 添加、搜索和删除用户偏好与项目信息 |
+| 工作区 | 查看目录、读取与编辑文本文件，路径仅限 workspace |
 
----
+设置保存到 `config.toml`，下一次对话立即使用。API Key 不通过配置读取接口返回；密钥输入留空会保留原值，点击“清除密钥”并保存才会清除。环境变量仍具有优先级，页面会显示被环境变量覆盖的配置项。
+
+开启/关闭工具会改变 Agent 实际可用的工具。关闭长期记忆后，保留已有内容供用户管理，但 Agent 不会读取或写入这些记忆。已有 CLI 会话保存在同一个 SQLite 检查点文件中，网页界面可以直接恢复。
+
+停止生成会取消后续 Agent 步骤；已经开始的模型请求或工具可能需要先完成。界面会保存已完成的工具结果，避免下一次对话留下不完整的工具调用记录。
+
+## Python 执行隔离
+
+聊天、模型设置、联网和文件操作可在 Windows/Linux/WSL 使用。**Python 工具只在 Linux/WSL 中，且系统隔离可用时运行**：需要 bubblewrap 0.9+、libseccomp，并允许隔离命名空间。使用系统包管理器安装这些组件；无需启动容器。
+
+隔离不可用时，页面会显示状态，Python 工具会拒绝执行；其余功能可继续使用。可在右侧关闭 Python 工具。Python 执行不继承密钥、代理或用户环境，禁止联网，限制时间、资源和输出；已有资源限制不是工作区的总磁盘配额。
+
+## 已有 Python 环境
+
+~~~bash
+python -m pip install -r requirements.txt
+python -m nuvora
+~~~
+
+不带命令默认启动网页界面。其他入口：
+
+~~~bash
+python -m nuvora web --port 8766        # 自定义本地端口
+python -m nuvora web --no-browser       # 不自动打开浏览器
+python -m nuvora chat                   # 保留原有交互终端
+python -m nuvora doctor                 # 终端自检
+python -m nuvora doctor --ping          # 一次真实模型请求
+python -m nuvora models                 # 终端模型列表
+python -m nuvora version
+~~~
+
+终端仍支持 `/new`、`/sessions`、`/resume`、`/model`、`/tools`、`/memory` 和 `/quit`。配置也可通过环境变量 `NUVORA_BASE_URL`、`NUVORA_API_KEY`、`NUVORA_MODEL` 覆盖。
 
 ## 项目结构
 
-```
-AI AGENT/
-├── DESIGN.md            # 架构设计文档（先看这个）
-├── README.md            # 本文件
-├── requirements.txt     # 直接依赖及版本约束
-├── requirements.lock.txt # 完整依赖锁定，不指定镜像源
-├── config.example.toml  # 配置模板 → 复制为 config.toml
-├── smoke_test.py        # 无 key 冒烟测试
-├── tests/               # 无 API 回归，含真实 Agent/SQLite 执行
-├── workspace/           # Agent 的文件沙箱（它只能碰这里）
-├── data/                # 运行时生成：会话检查点 + 长期记忆（SQLite）
-└── nuvora/              # 源码
-    ├── config.py        # 配置加载
-    ├── llm.py           # 模型工厂 + /models 探测 + doctor
-    ├── agent.py         # LangGraph Agent 组装
-    ├── memory.py        # 长期记忆
-    ├── tools/           # 工具系统
-    └── cli.py           # 交互终端
-```
-
-## 常见问题
-
-- **401 Unauthorized** → `api_key` 不对或没填。
-- **404 Not Found** → 模型名拼写错误，或 `base_url` 少了 `/v1` 之类的前缀；用 `nuvora models` 核对。
-- **连不上端点** → 检查网络/VPN；Ollama 需先 `ollama serve`。
-- **想重置对话记忆** → 删除 `data/` 目录下对应文件（`checkpoints.db` = 会话，`memory.db` = 长期记忆）。
-- **Python 执行不可用** → `doctor` 会报告原因。安装 bubblewrap/libseccomp，并确认系统允许用户、进程、网络和挂载命名空间；原生 Windows 请在 WSL 中运行。
-- **文件权限** → 文件工具限制在 `workspace/`。Python 使用操作系统隔离：工作区可写、Python 运行时只读、宿主私有目录不挂载、禁止联网、只传递固定环境变量。
-- **执行限额** → Python 默认 30 秒、最长 120 秒；每个进程内存上限 512 MiB，单文件写入上限 32 MiB，临时目录 64 MiB；管道输出在收集时限长。超时会清理执行进程及其后代。这些限额不等于工作区总磁盘配额。
-- **本地数据** → `config.toml`、`data/`、工作区生成文件和虚拟环境均排除在 Git 提交之外。
+| 文件/目录 | 用途 |
+|---|---|
+| start.bat / start.sh / start.py | 首次准备虚拟环境并打开界面 |
+| nuvora/web_ui.py | 本地 HTTP 服务、配置与 Agent 流接口 |
+| nuvora/static/ | 本地 HTML/CSS/JavaScript，无 CDN 依赖 |
+| nuvora/agent.py / memory.py | Agent 图与长期记忆 |
+| nuvora/tools/ | 联网、文件、Python、时间和环境工具 |
+| nuvora/cli.py | 原有终端入口 |
+| config.example.toml | 配置模板；页面会直接生成 config.toml |
+| requirements.txt / requirements.lock.txt | 已验证的固定依赖，不指定镜像源 |
+| data/ | 自动生成的 SQLite 会话与记忆；不进入 Git |
+| workspace/ | Agent 的工作区；用户生成文件不进入 Git |
+| tests/ / smoke_test.py | 无需真实 API Key 的回归与冒烟检查 |
 
 ## 验证
 
-```bash
-.venv/bin/python smoke_test.py
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m pip check
-```
+~~~bash
+python -m unittest discover -s tests -v
+python smoke_test.py
+python -m pip check
+~~~
 
-测试不调用真实模型 API。冒烟测试现在会执行工具循环并写入 SQLite，回归还会重新打开数据库验证历史上下文。
-隔离受限的环境会明确跳过实际 Python 沙箱测试，同时继续验证“隔离缺失时拒绝执行”、环境清理、输出限长和后代进程超时清理。
-跳过不代表对应功能已验收；应在目标 Linux/WSL 环境运行 `doctor` 和这些测试。
+回归包含真实 Agent 工具循环、SQLite 重开、并发写入、HTTP 配置/会话/记忆/文件操作、来源与 CSRF 校验，以及本地模拟 OpenAI 兼容端点的模型发现、连接测试、流式输出和停止后续聊。模拟端点仅存在于测试中；产品始终调用用户配置的实际模型。
 
-更完整的架构说明、安全边界与扩展路线见 [DESIGN.md](DESIGN.md)。
+系统禁止隔离时，实际 Python 隔离测试会明确跳过；工具仍拒绝回退到无隔离执行。

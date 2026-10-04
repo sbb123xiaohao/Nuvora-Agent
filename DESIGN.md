@@ -1,7 +1,7 @@
 # NUVORA 架构设计文档
 
 > **NUVORA** = **Nova**（新星）+ **Ora**（时刻）——「此刻升起的新星」
-> 一个基于 LangGraph 的通用 AI 智能助理 · v0.1.1
+> 一个基于 LangGraph 的通用 AI 智能助理 · v0.2.0
 
 ---
 
@@ -45,47 +45,22 @@ NUVORA 是一个运行在用户终端（WSL）里的**通用 AI 智能助理**�
 
 ## 3. 总体架构
 
-```
-┌────────────────────────────────────────────────────────────┐
-│                      CLI 终端（rich）                        │
-│   对话输入 · 流式渲染 · /new /model /tools /memory 斜杠命令   │
-└─────────────┬──────────────────────────────────────────────┘
-              │ thread_id + 用户消息
-              ▼
-┌────────────────────────────────────────────────────────────┐
-│              LangGraph Agent 核心循环（ReAct）               │
-│                                                            │
-│   ┌─────────┐   tool_calls    ┌──────────┐                 │
-│   │ agent   │ ──────────────► │  tools   │                 │
-│   │ (LLM)   │ ◄────────────── │  节点    │                 │
-│   └─────────┘   observations  └──────────┘                 │
-│        │                            │                      │
-│        │  ┌──────────────────────┐  │                      │
-│        └─►│ SqliteSaver 检查点    │◄─┘   （短期记忆：          │
-│           │ data/checkpoints.db  │        每步持久化，        │
-│           └──────────────────────┘        thread_id 隔离）  │
-└──────┬──────────────────────────────┬──────────────────────┘
-       ▼                              ▼
-┌── 模型接入层 ──────────┐      ┌──── 工具系统 ────────────┐
-│ config.toml（用户填）  │      │ web_search   联网搜索     │
-│ base_url / api_key /  │      │ web_fetch    网页正文     │
-│ model / temperature   │      │ list_dir/read_file/       │
-│                       │      │   write_file  文件沙箱     │
-│ ChatOpenAI ──► 任意   │      │ run_python    代码执行     │
-│ OpenAI 兼容端点        │      │ current_time/system_info  │
-│                       │      │ remember/recall/forget    │
-│ GET /models 探测可用  │      │           长期记忆工具     │
-│ 模型列表（nuvora      │      │                           │
-│ models / doctor）     │      │ data/memory.db（长期记忆） │
-└───────────────────────┘      └───────────────────────────┘
+```mermaid
+flowchart TD
+  UI["网页控制台"] --> Agent["LangGraph Agent"]
+  CLI["可选 CLI"] --> Agent
+  Agent --> Tools["工具"]
+  Agent <--> Checkpoint["SQLite 会话"]
+  Tools <--> Memory["长期记忆"]
+  Tools --> Workspace["工作区与隔离运行时"]
 ```
 
 ### 3.1 一次对话的完整数据流
 
-1. 用户在 CLI 输入文本 → CLI 以 `("user", text)` 追加到消息列表，按当前 `thread_id` 调用 `agent.stream()`。
+1. 用户在网页或 CLI 输入文本 → 界面以 `("user", text)` 追加到消息列表，按当前 `thread_id` 调用 `agent.stream()`。
 2. LangGraph 从 SqliteSaver 恢复该会话的历史状态，执行 **agent 节点**：把系统提示词 + 全部历史 + 本次消息发给模型。
 3. 模型要么直接回答（循环结束），要么发起 `tool_calls` → **tools 节点**执行对应工具 → 观察结果作为 `ToolMessage` 回到 agent 节点 → 重复，直到模型给出最终回答或达到 `recursion_limit`。
-4. 每一步的状态变更都写入 SqliteSaver；CLI 渲染过程消息（工具调用面板、结果面板）与最终回答（Markdown）。
+4. 每一步的状态变更都写入 SqliteSaver；网页/CLI 渲染过程消息（工具调用面板、结果面板）与最终回答（Markdown）。
 
 ---
 
@@ -94,7 +69,7 @@ NUVORA 是一个运行在用户终端（WSL）里的**通用 AI 智能助理**�
 ### 4.1 配置模型（三层优先级）
 
 1. **环境变量**：`NUVORA_API_KEY` / `NUVORA_BASE_URL` / `NUVORA_MODEL`（最高）
-2. **config.toml**（推荐，用户手填）
+2. **config.toml**（网页保存；也可手动填写）
 3. **内置默认值**（仅 base_url 有默认——智谱端点；key/model 必填否则无法对话）
 
 ### 4.2 模型发现协议
@@ -245,3 +220,18 @@ AI AGENT/
 | Web UI | FastAPI + 前端，复用 ChatSession | 新增 server.py |
 | 语音 | ASR/TTS 包一层 | cli.py |
 | 原生协议适配 | Anthropic/Google 专用 SDK | llm.py 工厂加分支 |
+
+
+## 统一网页界面（v0.2.0）
+
+默认入口改为本地网页，原 CLI 由 chat 子命令保留。标准库 ThreadingHTTPServer 仅监听 127.0.0.1；本地 HTML/CSS/JS 提供三栏控制界面，无新增 Web 框架依赖或 CDN。Windows/Linux 启动器首次准备虚拟环境，之后直接打开浏览器。
+
+web_ui.WebApplication 使用现有 Agent、SqliteSaver 与 LongTermMemory，并以 interface.db 保存会话标题；已有 CLI 检查点通过原 thread_id 恢复。模型配置经过类型、范围与地址校验后原子保存到 config.toml，POSIX 上文件权限为 0600，读取接口仅返回密钥是否已设置。错误配置可在页面修复，原文件先保存到被 Git 忽略的 data 目录。
+
+配置与工具开关应用到下一次对话，运行中的回合拒绝修改设置。messages/updates 流经 SSE 返回文字和工具结果；停止信号在流的检查点处理，已启动的请求/工具可能先完成。中断后合并 pending_writes 中的结果和取消记录，避免界面历史与下一回合的工具上下文不一致。
+
+联网、文件和 Python 开关持久化在 tools 分组；长期记忆开关关闭时不向 Agent 装配记忆工具或注入已存信息。页面手动管理记忆与工作区不依赖 Agent 的工具开关。文件界面复用既有路径限制与原子写入；被截断的读取结果不能直接保存。
+
+接口检查 Host、Origin、SameSite/HttpOnly 会话 Cookie 和写请求的随机 CSRF Token；限制请求大小，静态文件仅使用固定路径映射，内容使用 textContent/安全 DOM 节点显示。默认 CSP 禁止外部脚本与嵌入；模型密钥不会进入浏览器配置响应。
+
+验证包含真实 HTTP 服务、真实 Agent 图与本地 OpenAI 兼容模拟端点，覆盖保存/重开、老会话、工具执行、停止后恢复、记忆与文件操作、密钥脱敏和跨站请求拒绝。浏览器交互与视觉验证受执行环境限制时需单独记录，不能把 HTTP 测试描述为实际浏览器验收。

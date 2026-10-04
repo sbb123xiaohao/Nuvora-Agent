@@ -33,43 +33,43 @@ def _make_web_fetch() -> BaseTool:
     return web_fetch
 
 
-def _make_list_dir() -> BaseTool:
+def _make_list_dir(workspace=None) -> BaseTool:
     from langchain_core.tools import tool
 
     @tool
     def list_dir(path: str = ".") -> str:
         """列出 workspace/ 沙箱内的目录内容。path 为相对 workspace/ 的
         路径，默认列出根目录。"""
-        return files.sandbox_list_dir(WORKSPACE_DIR, path)
+        return files.sandbox_list_dir(workspace or WORKSPACE_DIR, path)
 
     return list_dir
 
 
-def _make_read_file() -> BaseTool:
+def _make_read_file(workspace=None) -> BaseTool:
     from langchain_core.tools import tool
 
     @tool
     def read_file(path: str) -> str:
         """读取 workspace/ 沙箱内的一个文本文件。path 为相对 workspace/
         的路径，如 "notes/todo.md"。超出上限会截断。"""
-        return files.sandbox_read_file(WORKSPACE_DIR, path)
+        return files.sandbox_read_file(workspace or WORKSPACE_DIR, path)
 
     return read_file
 
 
-def _make_write_file() -> BaseTool:
+def _make_write_file(workspace=None) -> BaseTool:
     from langchain_core.tools import tool
 
     @tool
     def write_file(path: str, content: str) -> str:
         """把文本内容写入 workspace/ 沙箱内的文件（覆盖式）。path 为相对
         workspace/ 的路径，父目录不存在会自动创建。"""
-        return files.sandbox_write_file(WORKSPACE_DIR, path, content)
+        return files.sandbox_write_file(workspace or WORKSPACE_DIR, path, content)
 
     return write_file
 
 
-def _make_run_python(cfg: Config) -> BaseTool:
+def _make_run_python(cfg: Config, workspace=None) -> BaseTool:
     from langchain_core.tools import tool
 
     @tool
@@ -78,7 +78,7 @@ def _make_run_python(cfg: Config) -> BaseTool:
         适合计算、数据处理、日期推算、格式转换、生成文件到 workspace/ 等。
         禁止联网；隔离不可用时拒绝执行。代码用 print() 输出结果。
         标准库可用，第三方库不一定已安装。"""
-        return python_repl.run_python_code(code, cfg.tools.python_timeout, WORKSPACE_DIR)
+        return python_repl.run_python_code(code, cfg.tools.python_timeout, workspace or WORKSPACE_DIR)
 
     return run_python
 
@@ -107,17 +107,14 @@ def _make_system_info() -> BaseTool:
     return system_info
 
 
-def build_tools(cfg: Config, memory: LongTermMemory | None = None) -> list[BaseTool]:
-    tools: list[BaseTool] = [
-        _make_web_search(cfg),
-        _make_web_fetch(),
-        _make_list_dir(),
-        _make_read_file(),
-        _make_write_file(),
-        _make_run_python(cfg),
-        _make_current_time(),
-        _make_system_info(),
-    ]
-    if memory is not None:
+def build_tools(cfg: Config, memory: LongTermMemory | None = None, workspace=None) -> list[BaseTool]:
+    tools: list[BaseTool] = [_make_current_time(), _make_system_info()]
+    if cfg.tools.web_enabled:
+        tools.extend([_make_web_search(cfg), _make_web_fetch()])
+    if cfg.tools.files_enabled:
+        tools.extend([_make_list_dir(workspace), _make_read_file(workspace), _make_write_file(workspace)])
+    if cfg.tools.python_enabled:
+        tools.append(_make_run_python(cfg, workspace))
+    if memory is not None and cfg.memory.enabled:
         tools.extend(build_memory_tools(memory))
     return tools

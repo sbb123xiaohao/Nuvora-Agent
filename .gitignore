@@ -3,6 +3,7 @@ __pycache__/
 .venv/
 venv/
 config.toml
+.nuvora-config-*.tmp
 data/
 workspace/*
 !workspace/.gitkeep
