@@ -1,0 +1,43 @@
+# ============================================================
+#  NUVORA 配置文件
+#  用法：把本文件复制为 config.toml，然后填写 api_key 与 model
+#  环境变量可覆盖：NUVORA_API_KEY / NUVORA_BASE_URL / NUVORA_MODEL
+#  不知道有什么模型？先运行：
+#    wsl bash -c "cd '<项目目录>' && .venv/bin/python -m nuvora models"
+# ============================================================
+
+[model]
+# 任意 OpenAI 兼容端点（结尾带不带斜杠均可）。常用示例：
+#   智谱 GLM     https://open.bigmodel.cn/api/paas/v4
+#   DeepSeek     https://api.deepseek.com
+#   Moonshot     https://api.moonshot.cn/v1
+#   OpenRouter   https://openrouter.ai/api/v1
+#   Ollama 本地  http://localhost:11434/v1     （api_key 随便填，如 ollama）
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+
+# 你的 API Key（必填；用 Ollama 时可填 ollama）
+api_key = ""
+
+# 模型名。示例：glm-4.6 / glm-4.5-flash / deepseek-chat / qwen3:8b
+# 留空则无法对话——先运行 `nuvora models` 探测本端点的可用模型再填
+model = ""
+
+temperature = 0.7
+
+[agent]
+# 单次任务中模型最多可进行的工具调用轮数
+max_iterations = 30
+
+[tools]
+# run_python 单次执行超时（秒，上限 120）
+python_timeout = 30
+# web_search 默认返回条数
+web_search_max_results = 5
+
+[memory]
+# 长期记忆开关（remember / recall / forget 工具）
+enabled = true
+
+[cli]
+# 流式（逐消息）渲染模型回复
+stream = true
