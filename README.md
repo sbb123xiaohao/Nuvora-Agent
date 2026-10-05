@@ -1,93 +1,165 @@
-# NUVORA ✦ 此刻升起的新星
+# NUVORA Agent
 
-一个基于 **LangGraph** 的本地 AI 智能助理。**v0.4.0 默认使用 CLI**，在同一个终端完成对话、模型配置、工具开关、会话和长期记忆操作。
+在终端里对话、配置模型、调用工具和继续历史任务。
+
+NUVORA 是基于 LangGraph 的本地 AI 助理，使用 OpenAI Chat Completions 兼容接口。**v0.5.0 为纯 CLI 版本**：启动即进入终端，模型设置、会话、文件和记忆都通过命令完成。
+
+- **终端对话**：流式 Markdown 回复，显示工具调用与结果，支持 Ctrl+C 中断当前回合。
+- **模型配置**：`/setup` 保存接口、密钥、模型和工具开关；`/model` 临时切换当前会话的模型。
+- **任务工具**：联网搜索、正文提取、工作区文件读写、隔离 Python 执行和系统信息。
+- **本地持久化**：SQLite 保存会话上下文与长期记忆，退出、重启后可继续。
 
 ## 快速开始
 
-安装 **Python 3.11+** 并解压完整项目：
+需要 **Python 3.11 或更新版本**，以及可用的模型端点。解压完整项目包，进入项目目录后启动：
 
-- **Windows**：双击 `start.bat`。
-- **Linux / WSL**：在项目目录运行 `./start.sh`。解压工具未保留执行权限时，先执行 `chmod +x start.sh`。
-- 启动器首次创建 `.venv` 并安装已锁定的依赖，随后直接进入终端。首次安装需要网络。
+| 系统 | 启动命令 |
+| --- | --- |
+| Windows | 双击 `start.bat`，或在终端运行 `.\start.bat` |
+| Linux / macOS | `bash start.sh` |
+| 已有 Python 环境 | `python start.py` |
 
-第一次在交互终端启动且未配置模型时，会进入配置向导；以后可随时输入 `/setup` 重新配置。
+启动脚本会创建项目内的 `.venv` 并安装锁定的依赖。首次启动需要联网下载依赖；以后仅在依赖清单变化时重新安装。
 
-1. 填写 OpenAI 兼容的接口地址和 API Key，密钥输入不回显。
-2. 选择是否获取模型列表，然后填写模型名称。
-3. 按需设置工具开关、长期记忆、温度、轮数和流式输出，确认保存后开始聊天。
+首次进入交互终端且尚未设置模型时，会自动打开配置向导。按提示填写：
 
-模型回复需要支持工具调用的兼容接口。模型列表接口缺失时可手动填写名称；Ollama 需要自行安装、启动并下载模型，本地无鉴权端点可留空密钥。
+1. **接口地址**：使用服务商提供的基础地址，例如 `https://your-endpoint.example/v1`；不要填写完整的 `/chat/completions` 路径。
+2. **API Key**：输入不回显；留空保留已存的密钥，输入 `-` 清除。
+3. **模型名称**：可选择探测 `/models`；端点不支持列表时直接填写名称。
+4. 确认保存，随后直接输入任务。
 
-设置原子保存到 `config.toml`，在下一回合生效。API Key 输入留空保留原值，输入 `-` 明确清除；保存前可以取消。非空环境变量 `NUVORA_BASE_URL`、`NUVORA_API_KEY`、`NUVORA_MODEL` 具有优先级，向导保留对应环境设置。
+```text
+你 › 帮我整理一份学习计划，保存到 notes/plan.md
+你 › /files notes
+你 › /read notes/plan.md
+你 › /new
+你 › /sessions
+你 › /resume <会话编号>
+你 › /history
+```
 
 ## 终端命令
 
-| 命令 | 操作 |
-|---|---|
-| `/help` | 查看命令 |
-| `/setup` 或 `/config` | 配置模型、密钥、工具和高级参数并保存 |
-| `/new` | 开启新会话，保留旧历史 |
-| `/sessions` | 查看历史会话编号 |
-| `/resume <id>` | 恢复指定会话 |
-| `/model <名称>` | 临时切换当前会话模型 |
-| `/models` | 获取当前端点的模型列表 |
-| `/tools` | 查看实际装配的工具 |
-| `/memory [关键词]` | 查看或检索长期记忆 |
-| `/quit` 或 `/exit` | 退出 |
+| 命令 | 用途 |
+| --- | --- |
+| `/help` | 查看所有命令 |
+| `/setup` | 配置模型、工具和高级参数，保存后下一回合生效 |
+| `/status` | 查看模型、接口、会话和配置路径；密钥只显示设置状态 |
+| `/new` | 创建新会话，保留原会话 |
+| `/sessions` | 列出会话编号、标题和当前会话标记 |
+| `/resume <id>` | 继续指定会话，支持旧版本历史和新建空会话 |
+| `/history` | 显示当前会话记录；工具结果显示摘要 |
+| `/models` | 探测当前端点的可用模型 |
+| `/model <名称>` | 临时切换当前会话模型；省略名称可查看当前值 |
+| `/tools` | 列出当前可装配的工具 |
+| `/files [目录]` | 浏览 `workspace/`，省略目录时查看根目录 |
+| `/read <路径>` | 查看工作区文本文件，最多显示 20,000 字符 |
+| `/memory [关键词]` | 查看或搜索长期记忆 |
+| `/remember <内容>` | 直接保存一条记忆，无需调用模型 |
+| `/forget <编号>` | 删除一条记忆，编号可从 `/memory` 获取 |
+| `/quit` | 退出，也支持 `/exit`、`/q` |
 
-直接输入文本即可对话，工具调用和结果会显示在终端中。按 Ctrl+C 中断当前回合，之后可以继续输入；在输入提示处按 Ctrl+C 或输入 `/quit` 退出。
+回答过程中按 **Ctrl+C** 停止当前回合，随后可继续输入。已开始的网络请求或工具可能先完成，中断不会撤销已写入的文件。输入提示符处按 Ctrl+C 或发送 EOF 会退出。
 
-联网、文件和 Python 开关影响 Agent 实际可用工具。长期记忆关闭后保留数据，但 Agent 不读取或写入这些记忆。终端与网页共用 SQLite 检查点，旧会话可继续恢复。
+## 子命令与手动安装
 
-## 其他入口
-
-已有 Python 环境可直接运行：
+启动脚本可以转发子命令，例如 `python start.py configure`、`bash start.sh doctor --ping`。如果自行管理环境，在项目目录安装：
 
 ```bash
+python -m venv .venv
+# Linux / macOS
+source .venv/bin/activate
+# Windows PowerShell 改用：.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-python -m nuvora                         # 默认 CLI
-python -m nuvora chat                    # 显式 CLI
-python -m nuvora configure               # 独立终端配置向导
-python -m nuvora doctor                  # 自检
-python -m nuvora doctor --ping           # 极短的真实模型请求
-python -m nuvora models                  # 模型列表
-python -m nuvora version
+python -m nuvora
 ```
 
-启动器也支持相同子命令，例如 `./start.sh configure` 或 `start.bat doctor`。
+| 子命令 | 作用 |
+| --- | --- |
+| `python -m nuvora` / `python -m nuvora chat` | 进入交互终端 |
+| `python -m nuvora configure` | 单独打开配置向导 |
+| `python -m nuvora models` | 探测模型列表 |
+| `python -m nuvora doctor` | 检查配置、依赖、工作区、隔离能力和模型列表接口 |
+| `python -m nuvora doctor --ping` | 额外发起一次模型对话验证，可能产生 API 费用 |
+| `python -m nuvora version` | 查看版本 |
+| `python -m nuvora --help` | 查看用法 |
 
-若需要网页入口，显式运行 `python -m nuvora web`；可加 `--port 8766` 或 `--no-browser`。网页仅监听本机，支持配置、聊天、会话、记忆和文本工作区管理。
+## 配置
 
-## Python 执行隔离
+`/setup` 会生成项目根目录的 `config.toml`。也可复制 [config.example.toml](config.example.toml) 后手动编辑。完整字段见示例文件：
 
-CLI 可在 Windows/Linux/WSL 使用。**Python 工具仅在 Linux/WSL，且系统隔离可用时执行**：需要 bubblewrap 0.9+、libseccomp，并允许隔离命名空间。使用系统包管理器安装这些组件，无需启动容器。
+```toml
+[model]
+base_url = "https://your-endpoint.example/v1"
+api_key = "your-api-key"
+model = "your-model-id"
+temperature = 0.7
 
-隔离不可用时工具拒绝执行，其余功能仍可使用；可在 `/setup` 关闭 Python 工具。执行不继承密钥、代理或用户环境，禁止联网，限制时间、资源和输出。已有资源限制不是整个工作区的磁盘配额。
+[tools]
+web_enabled = true
+files_enabled = true
+python_enabled = true
 
-停止会中断后续 Agent 步骤；已经开始的模型请求或工具可能先完成。中断恢复会保留已完成的结果，并补齐未完成工具的记录。
+[memory]
+enabled = true
 
-## 项目结构
+[cli]
+stream = true
+```
 
-| 文件/目录 | 用途 |
-|---|---|
-| start.bat / start.sh / start.py | 准备虚拟环境并进入 CLI，转发子命令 |
-| nuvora/cli.py / terminal_setup.py | 终端对话、命令与配置向导 |
-| nuvora/runtime.py / messages.py | 共享 Agent 执行、消息与中断恢复 |
-| nuvora/config.py | 配置快照、草稿、校验和原子保存 |
-| nuvora/sessions.py / memory.py | 会话仓库与长期记忆 |
-| nuvora/agent.py / llm.py | 图装配、模型工厂和端点诊断 |
-| nuvora/application.py | 应用协调、回合占用和资源生命周期 |
-| nuvora/web_ui.py / static/ | 可选本地网页与 HTTP/SSE 入口 |
-| nuvora/tools/ | 联网、工作区文件、Python 和系统工具 |
-| config.example.toml | 配置字段模板；向导可直接生成 config.toml |
-| requirements.txt / requirements.lock.txt | 已验证的固定依赖，不指定镜像源 |
-| data/ | 运行时 SQLite 会话与记忆，不进入 Git |
-| workspace/ | Agent 工作区，生成文件不进入 Git |
-| tests/ / smoke_test.py | 不需要真实 API Key 的回归与冒烟检查 |
+优先级为：**非空环境变量 → `config.toml` → 示例配置与内置默认值**。
 
-模块边界和扩展方式见 [DESIGN.md](DESIGN.md)。
+| 环境变量 | 对应字段 |
+| --- | --- |
+| `NUVORA_BASE_URL` | `model.base_url` |
+| `NUVORA_API_KEY` | `model.api_key` |
+| `NUVORA_MODEL` | `model.model` |
 
-## 验证
+向导会提示被环境变量覆盖的字段；修改这些字段前，先移除对应环境变量。配置按草稿校验后原子保存，取消或保存失败时继续使用原配置。`/model` 的临时选择随会话隔离；`/setup` 保存成功会清除当前会话的临时模型选择。
+
+`stream = true` 时，交互终端逐 token 更新 Markdown；重定向输出时显示完整消息。设为 `false` 则等待整个 Agent 回合结束再展示结果。
+
+## 数据与工具边界
+
+| 位置 | 内容 |
+| --- | --- |
+| `config.toml` | 本地配置，可能包含 API Key |
+| `data/checkpoints.db` | LangGraph 会话上下文 |
+| `data/interface.db` | 会话标题，保留旧版本文件名以兼容已有数据 |
+| `data/memory.db` | 长期记忆 |
+| `workspace/` | Agent 可以读写的文件 |
+
+以上运行数据已由 Git 忽略。升级时保留自己的 `config.toml`、`data/` 和 `workspace/`，替换源码后重新启动；备份运行数据前先退出 NUVORA。旧网页版本的会话和记忆可以继续通过 CLI 使用。
+
+模型请求会把当前任务、对话上下文和启用的记忆发送到所配置的端点。联网工具会访问外部服务，文件工具限制在 `workspace/` 内；`/files`、`/read` 同样使用受限路径解析。
+
+Python 执行需要 **Linux 或 WSL** 下可用的 `bubblewrap` 和 `prlimit`。原生 Windows、macOS 或禁止 namespace 的环境可以使用其余 CLI 功能，Python 工具在隔离不可用时拒绝执行。可通过 `/setup` 关闭它，使用 `doctor` 查看原因。
+
+## 常见问题
+
+| 现象 | 处理方式 |
+| --- | --- |
+| 未配置模型 | 输入 `/setup`，或用 `/models` 探测后 `/model <名称>` 临时启用 |
+| 401 / 403 | 检查 API Key、服务端权限和环境变量覆盖 |
+| 404 / 模型不存在 | 核对基础地址和模型名；不支持 `/models` 时可手动填写 |
+| 连接超时 | 检查网络、代理和接口地址，运行 `doctor --ping` |
+| 配置格式错误 | 运行 `python start.py configure` 重新填写；修复保存前会备份原文件到 `data/` |
+| 历史没有自动显示 | 用 `/sessions` 选择会话，再输入 `/history` |
+| Python 隔离不可用 | 查看 `doctor` 的原因，修复系统隔离条件或关闭 Python 工具 |
+| 向导提示需要交互终端 | 从终端启动 `configure`；无交互环境可编辑配置或使用环境变量 |
+
+## 开发与验证
+
+模块职责及中断恢复方式见 [DESIGN.md](DESIGN.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+
+| 模块 | 职责 |
+| --- | --- |
+| `cli.py` | 命令分发、对话循环和资源生命周期 |
+| `terminal_setup.py` / `terminal_output.py` | 配置输入、流式 Markdown 和工具展示 |
+| `config.py` | 快照、校验、环境变量覆盖、原子保存 |
+| `sessions.py` / `memory.py` | 会话和长期记忆 |
+| `runtime.py` / `agent.py` | 图执行、工具循环和中断恢复 |
+| `llm.py` / `tools/` | 模型适配、端点诊断和能力注册 |
 
 ```bash
 python -m unittest discover -s tests -v
@@ -95,6 +167,4 @@ python smoke_test.py
 python -m pip check
 ```
 
-回归覆盖终端配置保存/取消、密钥不回显与环境变量优先级，以及真实 Agent 工具循环、SQLite 重开、历史恢复、并发、文件边界、断流和资源清理。可选网页使用真实 HTTP 与本地 OpenAI 兼容模拟端点验证发现、连接、流式和停止后继续；模拟端点不代表真实云端提供商验收。
-
-系统禁止隔离时，实际 Python 隔离测试会明确跳过，工具仍拒绝回退到无隔离执行。
+测试使用离线模型执行真实 Agent 图，并用本地兼容端点验证发现、鉴权和流式/非流式对话，无需真实云端密钥。覆盖配置保存、会话恢复、中断、数据库清理、并发记忆和文件路径边界；系统隔离不可用时，实际隔离测试会明确跳过。

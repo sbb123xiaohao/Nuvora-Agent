@@ -2,7 +2,7 @@
 
 APP_NAME = "NUVORA"
 TAGLINE = "此刻升起的新星 · 通用 AI 智能助理"
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 SYSTEM_PROMPT_TEMPLATE = """你是 {app_name}（{tagline}），一个运行在用户本地的通用 AI 智能助理，当前版本 v{version}。
 

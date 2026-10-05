@@ -185,7 +185,7 @@ def save_config(cfg: Config, path: Path | None = None) -> None:
                 encoded = str(value)
             lines.append(f"{item.name} = {encoded}")
         sections.append("\n".join(lines))
-    text = "# NUVORA：通过界面保存的配置，请勿提交含密钥的配置文件。\n\n" + "\n\n".join(sections) + "\n"
+    text = "# NUVORA：通过终端保存的配置，请勿提交含密钥的配置文件。\n\n" + "\n\n".join(sections) + "\n"
     tomllib.loads(text)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=".nuvora-config-", suffix=".tmp", dir=target.parent)

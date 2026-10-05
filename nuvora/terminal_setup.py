@@ -59,7 +59,7 @@ def configure(store: ConfigStore, console) -> Config | None:
                 "web_search_max_results": IntPrompt.ask("搜索条数（1–20）", default=cfg.tools.web_search_max_results, console=console),
             }
             payload["memory"] = {"enabled": Confirm.ask("启用长期记忆", default=cfg.memory.enabled, console=console)}
-            payload["cli"] = {"stream": Confirm.ask("逐消息输出", default=cfg.cli.stream, console=console)}
+            payload["cli"] = {"stream": Confirm.ask("流式显示模型回复", default=cfg.cli.stream, console=console)}
             payload["model"]["temperature"] = FloatPrompt.ask("温度（0–2）", default=cfg.model.temperature, console=console)
             payload["agent"] = {"max_iterations": IntPrompt.ask("工具轮数（1–1000）", default=cfg.agent.max_iterations, console=console)}
         draft = store.candidate(payload)

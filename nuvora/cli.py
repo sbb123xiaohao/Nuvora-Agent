@@ -2,26 +2,25 @@
 
 from __future__ import annotations
 
-import json
 import sys
-import uuid
 from contextlib import ExitStack, closing
 
 from rich.console import Console
-from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from . import APP_NAME, TAGLINE, __version__
-from .agent import list_thread_ids
 from .config import CONFIG_PATH, DATA_DIR, WORKSPACE_DIR, Config, ConfigError, ConfigStore, load_config
+from .errors import NotFoundError
 from .llm import list_available_models, redact_error, run_doctor
 from .memory import LongTermMemory
-from .messages import content_text
 from .runtime import AgentRuntime
 from .sessions import SessionRepository
+from .terminal_output import TerminalOutput
 from .terminal_setup import configure
 from .tools import build_tools
+from .tools.files import sandbox_list_dir, sandbox_read_file
 
 console = Console()
 
@@ -31,10 +30,16 @@ HELP_ROWS = [
     ("/new", "开始一个新会话（历史会话保留，可用 /sessions 查看）"),
     ("/sessions", "列出历史会话"),
     ("/resume <id>", "切换到某个历史会话继续聊"),
+    ("/history", "查看当前会话的完整对话记录"),
     ("/model <名称>", "临时切换模型（仅本会话生效，不写回配置文件）"),
     ("/models", "探测当前端点的可用模型列表"),
     ("/tools", "列出 NUVORA 当前装配的所有工具"),
     ("/memory [关键词]", "查看长期记忆（可按关键词检索）"),
+    ("/remember <内容>", "保存一条长期记忆"),
+    ("/forget <编号>", "删除指定的长期记忆"),
+    ("/files [目录]", "浏览工作区文件"),
+    ("/read <路径>", "读取工作区文本文件"),
+    ("/status", "查看模型、会话、配置与工作区状态"),
     ("/quit", "退出（/exit 等效）"),
 ]
 
@@ -96,7 +101,7 @@ class ChatSession:
             return False
         if cmd == "/help":
             table = Table(box=None, show_header=False, pad_edge=False)
-            table.add_column(style="bold cyan", width=16)
+            table.add_column(style="bold cyan", width=22)
             table.add_column()
             for name, desc in HELP_ROWS:
                 table.add_row(name, desc)
@@ -104,12 +109,14 @@ class ChatSession:
         elif cmd in ("/setup", "/config"):
             self._cmd_setup()
         elif cmd == "/new":
-            self.thread_id = uuid.uuid4().hex
+            self.thread_id = self.repository.new()["id"]
             console.print(f"[green]✓[/] 已开启新会话，thread_id = [bold]{self.thread_id}[/]（旧会话仍保留）")
         elif cmd == "/sessions":
             self._cmd_sessions()
         elif cmd == "/resume":
             self._cmd_resume(arg)
+        elif cmd == "/history":
+            self._cmd_history()
         elif cmd == "/model":
             self._cmd_model(arg)
         elif cmd == "/models":
@@ -118,25 +125,39 @@ class ChatSession:
             self._cmd_tools()
         elif cmd == "/memory":
             self._cmd_memory(arg)
+        elif cmd == "/remember":
+            self._cmd_remember(arg)
+        elif cmd == "/forget":
+            self._cmd_forget(arg)
+        elif cmd == "/files":
+            console.print(sandbox_list_dir(self.workspace, arg or "."), markup=False, highlight=False)
+        elif cmd == "/read":
+            if not arg:
+                console.print("用法：/read <工作区内的相对路径>", markup=False)
+            else:
+                console.print(sandbox_read_file(self.workspace, arg), markup=False, highlight=False)
+        elif cmd == "/status":
+            self._cmd_status()
         else:
             console.print(f"[yellow]未知命令 {cmd}[/]，输入 /help 查看可用命令")
         return True
 
     def _cmd_sessions(self):
-        ids: list[str] = []
         try:
-            ids = list_thread_ids(self.checkpointer)
+            sessions = self.repository.list()
         except Exception as e:  # noqa: BLE001
-            console.print(f"[red]读取会话失败：[/]{e}")
+            console.print("读取会话失败：" + redact_error(self.cfg, e), markup=False)
             return
-        if not ids:
+        if not sessions:
             console.print("（还没有任何会话）")
             return
         table = Table(title="历史会话", box=None)
         table.add_column("thread_id", style="cyan")
+        table.add_column("标题")
         table.add_column("备注")
-        for tid in ids:
-            table.add_row(tid, "← 当前" if tid == self.thread_id else "")
+        for session in sessions:
+            tid = session["id"]
+            table.add_row(Text(tid), Text(session["title"]), "← 当前" if tid == self.thread_id else "")
         console.print(table)
         console.print("[dim]用 /resume <thread_id> 继续某个会话[/]")
 
@@ -152,15 +173,44 @@ class ChatSession:
             console.print("用法：/resume <thread_id>（先用 /sessions 查看）")
             return
         try:
-            checkpoint = self.checkpointer.get_tuple({"configurable": {"thread_id": arg, "checkpoint_ns": ""}})
+            self.repository.messages(arg)
+        except NotFoundError:
+            console.print(f"没有找到会话 {arg}", markup=False)
+            return
         except Exception as e:
             console.print(f"[red]读取会话失败：[/]{redact_error(self.cfg, e)}")
             return
-        if checkpoint is not None:
-            self.thread_id = arg
-            console.print(f"[green]✓[/] 已切换到会话 [bold]{arg}[/]，历史上下文已恢复")
+        self.thread_id = arg
+        console.print(f"已切换到会话 {arg}，用 /history 查看历史。", markup=False)
+
+    def _cmd_history(self):
+        try:
+            messages = self.repository.messages(self.thread_id)
+        except NotFoundError:
+            messages = []
+        if not messages:
+            console.print("（当前会话还没有消息）", markup=False)
             return
-        console.print(f"[yellow]没有找到会话 {arg}[/]")
+        output = TerminalOutput(console)
+        for message in messages:
+            output.message(message, include_user=True)
+
+    def _cmd_status(self):
+        table = Table(box=None, show_header=False)
+        table.add_column(style="dim")
+        table.add_column()
+        for label, value in (
+            ("模型", self.model_name or "未配置"),
+            ("接口", self.cfg.model.base_url),
+            ("API Key", "已设置" if self.cfg.model.api_key else "未设置"),
+            ("会话", self.thread_id),
+            ("配置", str(self.settings.path)),
+            ("工作区", str(self.workspace)),
+            ("流式输出", "开" if self.cfg.cli.stream else "关"),
+            ("长期记忆", "开" if self.cfg.memory.enabled else "关"),
+        ):
+            table.add_row(label, Text(value))
+        console.print(table)
 
     def _cmd_model(self, arg: str):
         if not arg:
@@ -209,8 +259,29 @@ class ChatSession:
         table.add_column("内容")
         table.add_column("标签", style="dim")
         for mid, created, content, tags in rows:
-            table.add_row(f"#{mid}", created[:16], content, tags)
+            table.add_row(f"#{mid}", created[:16], Text(content), Text(tags))
         console.print(table)
+
+    def _cmd_remember(self, text: str):
+        if not self.cfg.memory.enabled:
+            console.print("长期记忆未启用（用 /setup 设置）", markup=False)
+            return
+        if not text:
+            console.print("用法：/remember <内容>", markup=False)
+            return
+        mid = self.memory.add(text, thread_id=self.thread_id)
+        console.print(f"已保存记忆 #{mid}", markup=False)
+
+    def _cmd_forget(self, arg: str):
+        if not self.cfg.memory.enabled:
+            console.print("长期记忆未启用（用 /setup 设置）", markup=False)
+            return
+        if not arg.lstrip("#").isdigit():
+            console.print("用法：/forget <编号>（先用 /memory 查看）", markup=False)
+            return
+        mid = int(arg.lstrip("#"))
+        deleted = self.memory.delete(mid)
+        console.print(f"已删除记忆 #{mid}" if deleted else f"没有找到记忆 #{mid}", markup=False)
 
     # ---------- 对话 ----------
 
@@ -240,10 +311,13 @@ class ChatSession:
 
         try:
             self.repository.record_turn(self.thread_id, user_text)
-            with closing(runtime.stream(user_text, streaming=self.cfg.cli.stream)) as events:
+            # 非终端输出完整消息，交互终端逐 token 更新 Markdown。
+            with TerminalOutput(console) as output, closing(runtime.stream(
+                user_text, tokens=self.cfg.cli.stream and console.is_terminal,
+                streaming=self.cfg.cli.stream,
+            )) as events:
                 for event in events:
-                    if event.kind == "message":
-                        self._render_message(event.value)
+                    output.event(event)
         except KeyboardInterrupt:
             console.print("\n[dim]⏹ 已打断本回合[/]")
         except Exception as e:  # noqa: BLE001
@@ -254,32 +328,6 @@ class ChatSession:
 
         return build_chat_model(self.cfg, model_override=self.model_name)
 
-    def _render_message(self, msg):
-        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
-        if isinstance(msg, HumanMessage):
-            return
-        if isinstance(msg, AIMessage):
-            for tc in getattr(msg, "tool_calls", None) or []:
-                args_str = json.dumps(tc.get("args", {}), ensure_ascii=False)
-                if len(args_str) > 300:
-                    args_str = args_str[:300] + "…"
-                console.print(
-                    Panel(args_str, title=f"🛠 调用工具 · {tc.get('name', '?')}", border_style="dim cyan", expand=False)
-                )
-            text = content_text(msg.content).strip()
-            if text:
-                console.print()
-                console.print(Panel(Markdown(text), title=f"✦ {APP_NAME}", title_align="left", border_style="magenta"))
-                console.print()
-        elif isinstance(msg, ToolMessage):
-            text = content_text(msg.content).strip()
-            if len(text) > 500:
-                text = text[:500] + "…（结果已截断显示）"
-            console.print(
-                Panel(text or "（空结果）", title=f"↳ {getattr(msg, 'name', 'tool')}", border_style="dim green", expand=False)
-            )
-
     # ---------- 主循环 ----------
 
     def run(self):
@@ -289,16 +337,9 @@ class ChatSession:
             self.close()
 
     def _run_loop(self):
-        model_status = self.model_name or "[yellow]未配置模型（/setup 配置）[/]"
-        console.print(
-            Panel(
-                f"[bold magenta]{APP_NAME}[/] [dim]v{__version__}[/] · {TAGLINE}\n"
-                f"模型：{model_status}\n"
-                f"沙箱：workspace/ · 记忆：{'开' if self.cfg.memory.enabled else '关'} · 会话：{self.thread_id}\n\n"
-                f"[dim]输入 /help 查看命令，/quit 退出[/]",
-                border_style="magenta",
-            )
-        )
+        console.print(f"\n[bold magenta]{APP_NAME}[/] [dim]v{__version__}[/] · 终端 AI 助理")
+        console.print(f"模型：{self.model_name or '未配置（/setup 配置）'}", markup=False)
+        console.print("[dim]工作区 workspace/ · /help 命令 · /status 状态 · /quit 退出[/]\n")
         if not self.model_name and console.is_terminal:
             self._cmd_setup()
         while True:
@@ -361,7 +402,6 @@ def _usage() -> None:
 [bold]命令[/]：
   chat             进入交互终端（默认，可不带命令）
   configure        终端配置模型、密钥、工具与高级参数
-  web              显式启动可选网页界面
   doctor [--ping]  环境自检（--ping 额外做一次真实对话验证）
   models           列出当前端点的可用模型
   version          显示版本号""")
@@ -378,9 +418,6 @@ def main(argv: list[str] | None = None) -> int:
 
 def _main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
-    if args and args[0].lower() == "web":
-        from .web_ui import main as web_main
-        return web_main(args[1:])
     if not args or args[0].lower() == "chat":
         if len(args) > 1:
             _usage()
@@ -389,6 +426,10 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     cmd = args[0].lower()
+    if (cmd == "doctor" and args[1:] not in ([], ["--ping"])) or (cmd != "doctor" and len(args) > 1):
+        _usage()
+        console.print("[yellow]命令参数无效[/]")
+        return 2
     if cmd in ("version", "-v", "--version"):
         print(f"{APP_NAME} v{__version__}")
         return 0
@@ -396,17 +437,15 @@ def _main(argv: list[str] | None = None) -> int:
         _usage()
         return 0
     if cmd == "configure":
-        if len(args) > 1:
-            _usage()
-            return 2
         return 0 if configure(ConfigStore(CONFIG_PATH, DATA_DIR), console) is not None else 1
+
+    if cmd not in ("doctor", "models"):
+        _usage()
+        console.print(f"[yellow]未知命令：{args[0]}[/]")
+        return 2
 
     cfg = load_config()
     if cmd == "doctor":
         return _cmd_doctor(cfg, ping="--ping" in args)
     if cmd == "models":
         return _cmd_models(cfg)
-
-    _usage()
-    console.print(f"[yellow]未知命令：{args[0]}[/]")
-    return 2

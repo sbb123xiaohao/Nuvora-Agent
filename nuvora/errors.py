@@ -1,16 +1,8 @@
-"""应用错误；由入口层映射为 HTTP 状态或终端提示。"""
+"""会话操作错误，交由 CLI 显示。"""
 
 
 class ApplicationError(ValueError):
     """操作参数无效。"""
-
-
-class BusyError(ApplicationError):
-    """当前回合占用了可写资源。"""
-
-
-class ClosedError(ApplicationError):
-    """应用正在关闭或已关闭。"""
 
 
 class NotFoundError(ApplicationError):

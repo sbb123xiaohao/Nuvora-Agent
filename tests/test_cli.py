@@ -149,5 +149,112 @@ class TerminalSetupTests(unittest.TestCase):
         self.assertEqual(session.memory.count(), 1)
 
 
+class TerminalCommandTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="nuvora-commands-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.cfg = Config()
+        self.cfg.model.model = "offline-model"
+        self.cfg.model.api_key = "command-fixture-secret"
+        self.output = io.StringIO()
+        self.console = Console(file=self.output, width=160)
+        console_patch = patch.object(cli, "console", self.console)
+        console_patch.start()
+        self.addCleanup(console_patch.stop)
+
+    def session(self):
+        with patch.object(cli, "DATA_DIR", self.root / "data"), \
+             patch.object(cli, "WORKSPACE_DIR", self.root / "workspace"), \
+             patch.object(cli, "CONFIG_PATH", self.root / "config.toml"):
+            session = cli.ChatSession(self.cfg)
+        self.addCleanup(session.close)
+        return session
+
+    def test_empty_new_sessions_are_listed_and_can_be_resumed_after_restart(self):
+        session = self.session()
+        session.handle_command("/new")
+        empty_id = session.thread_id
+        session.handle_command("/new")
+        session.handle_command("/resume " + empty_id)
+        self.assertEqual(session.thread_id, empty_id)
+        session.handle_command("/history")
+        self.assertIn("还没有消息", self.output.getvalue())
+        session.close()
+        restored = self.session()
+        restored.handle_command("/sessions")
+        self.assertIn(empty_id, self.output.getvalue())
+        restored.handle_command("/resume " + empty_id)
+        self.assertEqual(restored.thread_id, empty_id)
+        self.assertEqual(restored.repository.messages(empty_id), [])
+
+    def test_titles_history_and_model_context_survive_restart(self):
+        session = self.session()
+        with patch.object(session, "_build_model", return_value=OfflineModel(responses=[AIMessage(content="saved reply")])):
+            session.chat_turn("first topic [red]")
+        session.close()
+        restored = self.session()
+        restored.handle_command("/sessions")
+        restored.handle_command("/resume default")
+        restored.handle_command("/history")
+        self.assertIn("first topic [red]", self.output.getvalue())
+        self.assertIn("saved reply", self.output.getvalue())
+        model = OfflineModel(responses=[AIMessage(content="continued reply")])
+        with patch.object(restored, "_build_model", return_value=model):
+            restored.chat_turn("continue topic")
+        self.assertIn("first topic [red]", [message.content for message in model.seen[0]])
+        self.assertIn("saved reply", [message.content for message in model.seen[0]])
+
+    def test_unknown_session_does_not_replace_active_session(self):
+        session = self.session()
+        session.handle_command("/new")
+        active = session.thread_id
+        session.handle_command("/resume nonexistent")
+        self.assertEqual(session.thread_id, active)
+        self.assertIn("没有找到会话", self.output.getvalue())
+
+    def test_file_commands_share_workspace_boundary_and_keep_literal_content(self):
+        session = self.session()
+        session.cfg.tools.files_enabled = False
+        (session.workspace / "file with spaces.txt").write_text("literal [red] content", encoding="utf-8")
+        (self.root / "outside.txt").write_text("outside-secret", encoding="utf-8")
+        session.handle_command("/files")
+        session.handle_command("/read file with spaces.txt")
+        session.handle_command("/read ../outside.txt")
+        self.assertIn("file with spaces.txt", self.output.getvalue())
+        self.assertIn("literal [red] content", self.output.getvalue())
+        self.assertIn("文件操作失败", self.output.getvalue())
+        self.assertNotIn("outside-secret", self.output.getvalue())
+
+    def test_memory_commands_save_search_delete_and_respect_disabled_state(self):
+        session = self.session()
+        session.handle_command("/remember memory [red] fact")
+        session.handle_command("/memory fact")
+        self.assertEqual(session.memory.count(), 1)
+        self.assertIn("memory [red] fact", self.output.getvalue())
+        session.handle_command("/forget #1")
+        self.assertEqual(session.memory.count(), 0)
+        session.memory.add("preserved while disabled")
+        session.cfg.memory.enabled = False
+        session.handle_command("/remember ignored")
+        session.handle_command("/forget 2")
+        self.assertEqual(session.memory.count(), 1)
+
+    def test_status_never_prints_api_key(self):
+        session = self.session()
+        session.handle_command("/model local-override")
+        session.handle_command("/status")
+        self.assertIn("local-override", self.output.getvalue())
+        self.assertIn("已设置", self.output.getvalue())
+        self.assertNotIn(self.cfg.model.api_key, self.output.getvalue())
+
+    def test_removed_web_command_and_invalid_arguments_return_usage_errors(self):
+        with patch.object(cli, "load_config") as load:
+            self.assertEqual(cli.main(["web"]), 2)
+            self.assertEqual(cli.main(["doctor", "--invalid"]), 2)
+            self.assertEqual(cli.main(["models", "unexpected"]), 2)
+        load.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

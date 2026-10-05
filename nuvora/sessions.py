@@ -1,4 +1,4 @@
-"""会话仓库：检查点、标题与旧 CLI 会话，独立于界面和 HTTP。"""
+"""会话仓库：检查点、标题与旧版本会话。"""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ class SessionRepository:
         with ExitStack() as resources:
             self.checkpointer = open_checkpointer(data_dir / "checkpoints.db")
             resources.callback(self.checkpointer.conn.close)
+            # 保留旧版本文件名，无需搬迁已有的会话标题。
             self._db = sqlite3.connect(data_dir / "interface.db", check_same_thread=False, timeout=10)
             resources.callback(self._db.close)
             self._db.execute("PRAGMA journal_mode=WAL")
